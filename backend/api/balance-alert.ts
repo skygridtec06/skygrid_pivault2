@@ -18,7 +18,7 @@ type BalanceAlertData = {
 };
 
 function setCors(response: VercelResponse) {
-  response.setHeader("Access-Control-Allow-Origin", "https://skygrid-pivault-frontend.vercel.app");
+  response.setHeader("Access-Control-Allow-Origin", "https://nelpivault.vercel.app");
   response.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   response.setHeader("Access-Control-Allow-Headers", "Content-Type");
 }
