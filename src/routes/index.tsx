@@ -88,9 +88,9 @@ function WalletPage() {
         loadAccount(publicKey),
         loadPayments(publicKey),
       ]);
-      await recordWalletPayments(publicKey, walletPayments);
       const nextLabel = label.trim() || `Wallet ${shortenAddress(publicKey, 4)}`;
       await addWallet(publicKey, nextLabel);
+      await recordWalletPayments(publicKey, walletPayments);
       rememberWalletSecret(publicKey, signingSecret);
       setAccount(null);
       setPayments([]);
