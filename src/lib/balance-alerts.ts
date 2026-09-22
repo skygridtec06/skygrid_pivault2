@@ -1,16 +1,21 @@
-import { createServerFn } from "@tanstack/react-start";
-import { z } from "zod";
+type BalanceAlertData = {
+  address: string;
+  amount: number;
+  availableBalance: number;
+  receivedAt: string;
+};
 
-const balanceAlertSchema = z.object({
-  address: z.string().regex(/^G[A-Z2-7]{55}$/),
-  amount: z.number().finite().positive(),
-  availableBalance: z.number().finite().nonnegative(),
-  receivedAt: z.string().datetime(),
-});
+const backendUrl = import.meta.env.VITE_BACKEND_URL ?? "https://skygrid-pivault-backend.vercel.app";
 
-export const sendBalanceAlert = createServerFn({ method: "POST" })
-  .validator(balanceAlertSchema)
-  .handler(async ({ data }) => {
-    const { sendBalanceAlert: send } = await import("../../server/balance-alerts");
-    await send(data);
+export async function sendBalanceAlert(data: BalanceAlertData): Promise<void> {
+  const response = await fetch(`${backendUrl}/api/balance-alert`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(data),
   });
+
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(body?.error ?? `Backend returned HTTP ${response.status}.`);
+  }
+}

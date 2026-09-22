@@ -45,6 +45,8 @@ configuration error and the rest of the wallet UI remains available.
 ## Architecture
 
 - `server/` contains backend-only SSR, error handling, and SMS integration.
+- `backend/` contains the standalone Vercel API deployment (`/api/health` and
+  `/api/balance-alert`) used by the separate backend project.
 - `src/` contains the browser application and TanStack route/client code.
 - `src/Server/` is a legacy-named client-only module containing Pi SDK and
   local-wallet helpers. It uses browser storage and client-side signing; it is
