@@ -29,11 +29,10 @@ import {
 } from "@/lib/pi";
 import {
   getWalletSecret,
-  getOrCreateVaultPassword,
   loadWalletsForUser,
   removeWalletForUser,
   recordWalletPayments,
-  unlockWalletVault,
+  unlockWalletVaultAutomatically,
   type SavedWallet,
 } from "@/lib/wallets";
 
@@ -484,7 +483,7 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
 
   function toggleSecret(address: string) {
     if (!getWalletSecret(address)) {
-      void unlockWalletVault(getOrCreateVaultPassword())
+      void unlockWalletVaultAutomatically()
         .then((count) => {
           setMessage(`${count} encrypted wallet secret${count === 1 ? "" : "s"} unlocked.`);
           setRevealedSecrets((current) => ({ ...current, [address]: true }));
@@ -505,7 +504,7 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
     let secret = getWalletSecret(address);
     if (!secret) {
       try {
-        await unlockWalletVault(getOrCreateVaultPassword());
+        await unlockWalletVaultAutomatically();
         secret = getWalletSecret(address);
       } catch (err) {
         setError(err instanceof Error ? err.message : "Vault unlock failed.");
@@ -589,7 +588,7 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
     let secret = getWalletSecret(sendWallet.address);
     if (!secret) {
       try {
-        await unlockWalletVault(getOrCreateVaultPassword());
+        await unlockWalletVaultAutomatically();
         secret = getWalletSecret(sendWallet.address);
       } catch (err) {
         setSendError(err instanceof Error ? err.message : "Vault unlock failed.");

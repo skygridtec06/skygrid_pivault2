@@ -117,6 +117,24 @@ export async function unlockWalletVault(password: string): Promise<number> {
   return restored;
 }
 
+export async function unlockWalletVaultAutomatically(): Promise<number> {
+  const automaticPassword = getOrCreateVaultPassword();
+  try {
+    return await unlockWalletVault(automaticPassword);
+  } catch (automaticError) {
+    const legacyPassword = window.prompt(
+      "These wallets use an older vault password. Enter it once to migrate them to automatic unlock.",
+    );
+    if (!legacyPassword) throw automaticError;
+    const restored = await unlockWalletVault(legacyPassword);
+    const secrets = [...sessionSecrets.entries()];
+    for (const [address, secret] of secrets) {
+      await persistWalletSecret(address, secret, automaticPassword);
+    }
+    return restored;
+  }
+}
+
 export function getVaultPassword(): string | undefined {
   return vaultPassword;
 }
