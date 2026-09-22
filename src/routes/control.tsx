@@ -19,6 +19,7 @@ import { createUser, deleteUser, listUsers, type ManagedUser } from "@/lib/auth"
 import { sendBalanceAlert } from "@/lib/balance-alerts";
 import {
   loadAccount,
+  loadAccountBalance,
   loadPayments,
   publicKeyFromSecret,
   readableError,
@@ -294,7 +295,12 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
         const wallet = list[cursor++];
         if (!wallet) break;
         try {
-          nextAccounts[wallet.address] = await loadAccount(wallet.address);
+          const account = await loadAccountBalance(wallet.address);
+          nextAccounts[wallet.address] = {
+            ...account,
+            lockedBalance: accounts[wallet.address]?.lockedBalance ?? account.lockedBalance,
+            lockedBreakdown: accounts[wallet.address]?.lockedBreakdown ?? account.lockedBreakdown,
+          };
         } catch {
           nextAccounts[wallet.address] = null;
         }
@@ -360,7 +366,16 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
           const wallet = wallets[cursor++];
           if (!wallet) break;
           try {
-            rows.push([wallet.address, await loadAccount(wallet.address)]);
+            const account = await loadAccountBalance(wallet.address);
+            rows.push([
+              wallet.address,
+              {
+                ...account,
+                lockedBalance: accounts[wallet.address]?.lockedBalance ?? account.lockedBalance,
+                lockedBreakdown:
+                  accounts[wallet.address]?.lockedBreakdown ?? account.lockedBreakdown,
+              },
+            ]);
           } catch {
             rows.push([wallet.address, null]);
           }

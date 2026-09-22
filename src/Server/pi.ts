@@ -128,6 +128,39 @@ export async function loadAccount(publicKey: string): Promise<PiAccount> {
         funded: false,
       };
     }
+
+    throw err;
+  }
+}
+
+export async function loadAccountBalance(publicKey: string): Promise<PiAccount> {
+  const { Horizon } = await sdk();
+  const server = new Horizon.Server(PI_HORIZON);
+  try {
+    const acct = await server.loadAccount(publicKey);
+    const native = acct.balances.find((b) => b.asset_type === "native");
+    return {
+      publicKey,
+      balance: native && "balance" in native ? native.balance : "0",
+      lockedBalance: "0",
+      lockedBreakdown: [],
+      sequence: acct.sequenceNumber(),
+      subentryCount: acct.subentry_count,
+      funded: true,
+    };
+  } catch (err: unknown) {
+    const status = (err as { response?: { status?: number } })?.response?.status;
+    if (status === 404) {
+      return {
+        publicKey,
+        balance: "0",
+        lockedBalance: "0",
+        lockedBreakdown: [],
+        sequence: "0",
+        subentryCount: 0,
+        funded: false,
+      };
+    }
     throw err;
   }
 }
