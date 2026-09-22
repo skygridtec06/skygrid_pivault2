@@ -16,7 +16,6 @@ import {
 } from "lucide-react";
 import { ActionButton, Field } from "@/components/Field";
 import { createUser, deleteUser, listUsers, type ManagedUser } from "@/lib/auth";
-import { sendBalanceAlert } from "@/lib/balance-alerts";
 import {
   loadAccount,
   loadAccountBalance,
@@ -41,7 +40,6 @@ import {
 
 const PIN_KEY = "pi_admin_pin_v1";
 const UNLOCK_KEY = "pi_admin_unlocked_v1";
-const BALANCE_BASELINE_KEY = "pi_available_balance_baseline_v1";
 const ADMIN_TRANSACTIONS_KEY = "pi_admin_transactions_v1";
 const DISMISSED_LOADED_PAYMENTS_KEY = "pi_dismissed_loaded_payments_v1";
 const WITHDRAWAL_ADDRESS = "MALYJFJ5SVD45FBWN2GT4IW67SEZ3IBOFSBSPUFCWV427NBNLG3PWAAAAAAAABMCRD2YU";
@@ -238,8 +236,6 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
   const [copiedAddress, setCopiedAddress] = useState<string | null>(null);
   const [transactions, setTransactions] = useState<Record<string, PiPayment[]>>({});
   const [transactionsLoading, setTransactionsLoading] = useState<string | null>(null);
-  const [refreshCountdown, setRefreshCountdown] = useState(5);
-  const [pollTick, setPollTick] = useState(0);
   const [sortMode, setSortMode] = useState<"balance" | "unlock">("balance");
   const [walletSearch, setWalletSearch] = useState("");
   const [walletSearchAddress, setWalletSearchAddress] = useState("");
@@ -254,9 +250,6 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
   const [loadedLoading, setLoadedLoading] = useState(false);
   const [showLoaded, setShowLoaded] = useState(false);
   const [walletPendingRemoval, setWalletPendingRemoval] = useState<AdminWallet | null>(null);
-  const previousBalances = useRef<Record<string, number>>({});
-  const hasBalanceBaseline = useRef(false);
-  const pollInFlight = useRef(false);
   const balanceRefreshId = useRef(0);
   const backupInput = useRef<HTMLInputElement>(null);
 
@@ -271,17 +264,6 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
       );
     });
     setAdminTransactions(loadAdminTransactions());
-    try {
-      const saved = window.localStorage.getItem(BALANCE_BASELINE_KEY);
-      const baseline = saved ? (JSON.parse(saved) as Record<string, number>) : {};
-      previousBalances.current = Object.fromEntries(
-        Object.entries(baseline).filter(([, balance]) => Number.isFinite(balance)),
-      );
-      hasBalanceBaseline.current = Object.keys(previousBalances.current).length > 0;
-    } catch {
-      previousBalances.current = {};
-      hasBalanceBaseline.current = false;
-    }
   }, []);
 
   async function refreshAll(list = wallets) {
@@ -347,105 +329,13 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
   }
 
   useEffect(() => {
-    void refreshLoaded(wallets);
+    void refreshAll(wallets);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wallets.length]);
 
   useEffect(() => {
-    if (wallets.length === 0) return;
-    let cancelled = false;
-
-    async function pollBalances() {
-      if (pollInFlight.current) return;
-      pollInFlight.current = true;
-      setRefreshing(true);
-      const rows: Array<readonly [string, PiAccount | null]> = [];
-      let cursor = 0;
-      const worker = async () => {
-        while (cursor < wallets.length) {
-          const wallet = wallets[cursor++];
-          if (!wallet) break;
-          try {
-            const account = await loadAccountBalance(wallet.address);
-            rows.push([
-              wallet.address,
-              {
-                ...account,
-                lockedBalance: accounts[wallet.address]?.lockedBalance ?? account.lockedBalance,
-                lockedBreakdown:
-                  accounts[wallet.address]?.lockedBreakdown ?? account.lockedBreakdown,
-              },
-            ]);
-          } catch {
-            rows.push([wallet.address, null]);
-          }
-          const account = rows[rows.length - 1];
-          if (account) setAccounts((current) => ({ ...current, [account[0]]: account[1] }));
-        }
-      };
-      await Promise.all(Array.from({ length: Math.min(24, wallets.length) }, () => worker()));
-      try {
-        if (cancelled) return;
-
-        const nextAccounts = Object.fromEntries(rows);
-        setAccounts(nextAccounts);
-        void refreshLoaded(wallets);
-
-        for (const [address, account] of rows) {
-          if (!account) continue;
-          const balance = Number(account.balance);
-          if (!Number.isFinite(balance)) continue;
-          const previous = previousBalances.current[address];
-          if (hasBalanceBaseline.current && previous !== undefined && balance > previous) {
-            try {
-              await sendBalanceAlert({
-                address,
-                amount: balance - previous,
-                availableBalance: balance,
-                receivedAt: new Date().toISOString(),
-              });
-              setMessage(
-                `SMS alert sent for ${balance - previous} Pi received by ${shortenAddress(address)}.`,
-              );
-            } catch (err) {
-              setError(err instanceof Error ? err.message : "The balance alert could not be sent.");
-            }
-          }
-          previousBalances.current[address] = balance;
-        }
-        hasBalanceBaseline.current = true;
-        window.localStorage.setItem(BALANCE_BASELINE_KEY, JSON.stringify(previousBalances.current));
-      } finally {
-        pollInFlight.current = false;
-        if (!cancelled) setRefreshing(false);
-      }
-    }
-
-    void pollBalances();
-    return () => {
-      cancelled = true;
-    };
-    // The polling loop intentionally runs on the five-second tick and uses the current wallet list.
+    void refreshLoaded(wallets);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pollTick, wallets]);
-
-  useEffect(() => {
-    if (wallets.length === 0) {
-      setRefreshCountdown(5);
-      return;
-    }
-
-    const countdown = window.setInterval(() => {
-      setRefreshCountdown((current) => {
-        if (current <= 1) {
-          setPollTick((tick) => tick + 1);
-          return 5;
-        }
-        return current - 1;
-      });
-    }, 1000);
-
-    return () => window.clearInterval(countdown);
   }, [wallets.length]);
 
   function removeOne(wallet: AdminWallet) {
@@ -978,9 +868,12 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
               className={`h-4 w-4 shrink-0 text-accent ${refreshing ? "animate-spin" : ""}`}
               aria-hidden="true"
             />
-            <span>Automatic balance check is active.</span>
+            <span>Balances load when the wallet list opens.</span>
           </div>
           <div className="flex flex-wrap items-center justify-between gap-3 sm:justify-end">
+            <ActionButton tone="ghost" onClick={() => void refreshAll()} disabled={refreshing}>
+              {refreshing ? "Loading balances…" : "Refresh balances"}
+            </ActionButton>
             <label className="flex items-center gap-2 text-xs font-semibold text-muted-foreground">
               <span>Rank by</span>
               <select
@@ -995,9 +888,6 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
                 <option value="unlock">Earliest upcoming unlock</option>
               </select>
             </label>
-            <span className="font-semibold text-accent">
-              {refreshing ? "Checking balances…" : `Next check in ${refreshCountdown}s`}
-            </span>
           </div>
         </div>
 
