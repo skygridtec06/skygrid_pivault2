@@ -256,6 +256,7 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
   const previousBalances = useRef<Record<string, number>>({});
   const hasBalanceBaseline = useRef(false);
   const pollInFlight = useRef(false);
+  const balanceRefreshId = useRef(0);
   const backupInput = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -284,19 +285,27 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
 
   async function refreshAll(list = wallets) {
     if (list.length === 0) return;
+    const refreshId = ++balanceRefreshId.current;
     setRefreshing(true);
-    const rows = await Promise.all(
-      list.map(async (w) => {
+    const nextAccounts: Record<string, PiAccount | null> = {};
+    let cursor = 0;
+    const worker = async () => {
+      while (cursor < list.length && refreshId === balanceRefreshId.current) {
+        const wallet = list[cursor++];
+        if (!wallet) break;
         try {
-          const acct = await loadAccount(w.address);
-          return [w.address, acct] as const;
+          nextAccounts[wallet.address] = await loadAccount(wallet.address);
         } catch {
-          return [w.address, null] as const;
+          nextAccounts[wallet.address] = null;
         }
-      }),
-    );
-    setAccounts(Object.fromEntries(rows));
-    setRefreshing(false);
+        setAccounts((current) => ({
+          ...current,
+          [wallet.address]: nextAccounts[wallet.address] ?? null,
+        }));
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(24, list.length) }, () => worker()));
+    if (refreshId === balanceRefreshId.current) setRefreshing(false);
   }
 
   async function refreshLoaded(list = wallets) {
@@ -332,11 +341,6 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
   }
 
   useEffect(() => {
-    void refreshAll(wallets);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wallets.length, dismissedLoadedPayments]);
-
-  useEffect(() => {
     void refreshLoaded(wallets);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wallets.length]);
@@ -348,15 +352,23 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
     async function pollBalances() {
       if (pollInFlight.current) return;
       pollInFlight.current = true;
-      const rows = await Promise.all(
-        wallets.map(async (wallet) => {
+      setRefreshing(true);
+      const rows: Array<readonly [string, PiAccount | null]> = [];
+      let cursor = 0;
+      const worker = async () => {
+        while (cursor < wallets.length) {
+          const wallet = wallets[cursor++];
+          if (!wallet) break;
           try {
-            return [wallet.address, await loadAccount(wallet.address)] as const;
+            rows.push([wallet.address, await loadAccount(wallet.address)]);
           } catch {
-            return [wallet.address, null] as const;
+            rows.push([wallet.address, null]);
           }
-        }),
-      );
+          const account = rows[rows.length - 1];
+          if (account) setAccounts((current) => ({ ...current, [account[0]]: account[1] }));
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(24, wallets.length) }, () => worker()));
       try {
         if (cancelled) return;
 
@@ -390,6 +402,7 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
         window.localStorage.setItem(BALANCE_BASELINE_KEY, JSON.stringify(previousBalances.current));
       } finally {
         pollInFlight.current = false;
+        if (!cancelled) setRefreshing(false);
       }
     }
 
