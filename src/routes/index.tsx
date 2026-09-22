@@ -84,13 +84,9 @@ function WalletPage() {
         return;
       }
 
-      const [walletAccount, walletPayments] = await Promise.all([
-        loadAccount(publicKey),
-        loadPayments(publicKey),
-      ]);
+      const walletAccount = await loadAccount(publicKey);
       const nextLabel = label.trim() || `Wallet ${shortenAddress(publicKey, 4)}`;
       await addWallet(publicKey, nextLabel);
-      await recordWalletPayments(publicKey, walletPayments);
       rememberWalletSecret(publicKey, signingSecret);
       setAccount(null);
       setPayments([]);
@@ -108,6 +104,14 @@ function WalletPage() {
           ? `${availableBalance.toLocaleString(undefined, { maximumFractionDigits: 7 })} Pi`
           : "Unavailable",
       });
+
+      // Do not block wallet creation on the historical payment sync.
+      void loadPayments(publicKey)
+        .then((walletPayments) => recordWalletPayments(publicKey, walletPayments))
+        .catch((syncError: unknown) => {
+          console.error("Wallet transaction sync failed", syncError);
+          setNotice("Wallet added. Transaction history will retry on the next refresh.");
+        });
     } catch (err) {
       setAccount(null);
       setError(readableError(err));
