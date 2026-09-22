@@ -65,6 +65,17 @@ async function loadPayments(address: string): Promise<PaymentRecord[]> {
   return body._embedded?.records ?? [];
 }
 
+async function walletHasRecordedPayments(walletId: string): Promise<boolean> {
+  const response = await supabaseFetch(
+    `wallet_transactions?wallet_id=eq.${encodeURIComponent(walletId)}&select=external_id&limit=1`,
+  );
+  if (!response.ok) {
+    throw new Error(`Supabase transaction lookup failed with HTTP ${response.status}.`);
+  }
+  const rows = (await response.json()) as unknown[];
+  return rows.length > 0;
+}
+
 async function loadBalance(address: string): Promise<number> {
   const response = await fetch(`${HORIZON_URL}/accounts/${encodeURIComponent(address)}`, {
     headers: { accept: "application/json" },
@@ -166,9 +177,10 @@ export default async function handler(request: VercelRequest, response: VercelRe
     for (const wallet of wallets) {
       const payments = await loadPayments(wallet.address);
       const balance = await loadBalance(wallet.address);
+      const hasHistory = await walletHasRecordedPayments(wallet.id);
       for (const payment of payments) {
         paymentsChecked += 1;
-        if (await recordPayment(wallet, payment)) {
+        if (hasHistory && (await recordPayment(wallet, payment))) {
           await sendSms(
             wallet.address,
             Number(payment.amount ?? payment.starting_balance ?? 0),
@@ -177,6 +189,7 @@ export default async function handler(request: VercelRequest, response: VercelRe
           );
           alertsSent += 1;
         }
+        if (!hasHistory) await recordPayment(wallet, payment);
       }
     }
     return response.status(200).json({ walletsChecked: wallets.length, paymentsChecked, alertsSent });
