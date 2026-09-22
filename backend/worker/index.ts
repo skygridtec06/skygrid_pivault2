@@ -144,7 +144,8 @@ function parseSseBlock(block: string): PaymentRecord | null {
     .join("");
   if (!data) return null;
   try {
-    return JSON.parse(data) as PaymentRecord;
+    const parsed: unknown = JSON.parse(data);
+    return parsed && typeof parsed === "object" ? (parsed as PaymentRecord) : null;
   } catch {
     return null;
   }
