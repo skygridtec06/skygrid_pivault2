@@ -61,6 +61,12 @@ async function recordPayment(wallet: Wallet, payment: PaymentRecord): Promise<bo
   const to = payment.to ?? payment.account ?? "";
   const direction = to === wallet.address ? "in" : from === wallet.address ? "out" : "other";
   const amount = Number(payment.amount ?? payment.starting_balance ?? 0);
+  const externalId = payment.id || payment.transaction_hash;
+  const transactionHash = payment.transaction_hash || externalId;
+  if (!externalId || !transactionHash || !payment.created_at || !payment.type) {
+    console.warn(`Ignoring incomplete Pi payment event for ${wallet.address}.`);
+    return false;
+  }
   const asset =
     payment.asset_type === "native"
       ? "Pi"
@@ -73,17 +79,20 @@ async function recordPayment(wallet: Wallet, payment: PaymentRecord): Promise<bo
     body: JSON.stringify({
       wallet_id: wallet.id,
       user_id: wallet.user_id,
-      external_id: payment.id,
+      external_id: externalId,
       transaction_type: payment.type,
       direction,
       counterparty: direction === "in" ? from : to,
       amount,
       asset,
       created_at: payment.created_at,
-      transaction_hash: payment.transaction_hash,
+      transaction_hash: transactionHash,
     }),
   });
-  if (!response.ok) throw new Error(`Supabase transaction insert failed with HTTP ${response.status}.`);
+  if (!response.ok) {
+    const detail = (await response.text()).slice(0, 300);
+    throw new Error(`Supabase transaction insert failed with HTTP ${response.status}: ${detail}`);
+  }
   const inserted = (await response.json()) as unknown[];
   return inserted.length > 0 && direction === "in" && amount > 0;
 }
