@@ -32,7 +32,7 @@ export async function loadWallets(): Promise<SavedWallet[]> {
 export async function loadWalletsForUser(username: string): Promise<SavedWallet[]> {
   const { data: profile, error: profileError } = await getSupabase()
     .from("profiles")
-    .select("id, user_id")
+    .select("id")
     .eq("username", username.trim().toLowerCase())
     .single();
   if (profileError) throw new Error(profileError.message);
@@ -83,7 +83,7 @@ export async function recordWalletPayments(address: string, payments: PiPayment[
   if (payments.length === 0) return;
   const { data: wallet, error: walletError } = await getSupabase()
     .from("wallets")
-    .select("id")
+    .select("id, user_id")
     .eq("address", address)
     .single();
   if (walletError) throw new Error(walletError.message);
