@@ -238,6 +238,9 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
   const [refreshCountdown, setRefreshCountdown] = useState(5);
   const [pollTick, setPollTick] = useState(0);
   const [sortMode, setSortMode] = useState<"balance" | "unlock">("balance");
+  const [walletSearch, setWalletSearch] = useState("");
+  const [walletSearchAddress, setWalletSearchAddress] = useState("");
+  const [walletSearching, setWalletSearching] = useState(false);
   const [adminTransactions, setAdminTransactions] = useState<AdminTransaction[]>([]);
   const [showAdminTransactions, setShowAdminTransactions] = useState(false);
   const [showUsers, setShowUsers] = useState(false);
@@ -686,6 +689,41 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
       return normalizedB - normalizedA;
     });
   }, [accounts, sortMode, wallets]);
+  const visibleWallets = useMemo(() => {
+    if (!walletSearchAddress) return rankedWallets;
+    return rankedWallets.filter((wallet) => wallet.address === walletSearchAddress);
+  }, [rankedWallets, walletSearchAddress]);
+  async function searchWallet() {
+    const query = walletSearch.trim();
+    setError("");
+    if (!query) {
+      setWalletSearchAddress("");
+      return;
+    }
+    const directMatch = wallets.find(
+      (wallet) => wallet.address.toLowerCase() === query.toLowerCase(),
+    );
+    if (directMatch) {
+      setWalletSearchAddress(directMatch.address);
+      return;
+    }
+    setWalletSearching(true);
+    try {
+      const derivedAddress = await publicKeyFromSecret(query);
+      const secretMatch = wallets.find((wallet) => wallet.address === derivedAddress);
+      if (!secretMatch) {
+        setWalletSearchAddress("");
+        setError("No tracked wallet matches that secret key or address.");
+        return;
+      }
+      setWalletSearchAddress(secretMatch.address);
+    } catch {
+      setWalletSearchAddress("");
+      setError("Paste a tracked wallet address or its valid secret key.");
+    } finally {
+      setWalletSearching(false);
+    }
+  }
   const sendAccount = sendWallet ? accounts[sendWallet.address] : undefined;
   const sendBalanceLabel =
     sendAccount === undefined
@@ -1018,13 +1056,53 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
           )}
         </section>
 
+        <div className="mb-6 flex flex-col gap-3 rounded-xl border border-border bg-secondary/20 p-4 sm:flex-row sm:items-end">
+          <div className="min-w-0 flex-1">
+            <Field
+              label="Search wallet"
+              placeholder="Paste an address or secret key"
+              spellCheck={false}
+              value={walletSearch}
+              onChange={(event) => setWalletSearch(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") void searchWallet();
+              }}
+            />
+          </div>
+          <div className="flex gap-2">
+            <ActionButton
+              tone="accent"
+              onClick={() => void searchWallet()}
+              disabled={walletSearching}
+            >
+              {walletSearching ? "Searching…" : "Search"}
+            </ActionButton>
+            {walletSearchAddress ? (
+              <ActionButton
+                tone="ghost"
+                onClick={() => {
+                  setWalletSearch("");
+                  setWalletSearchAddress("");
+                  setError("");
+                }}
+              >
+                Clear
+              </ActionButton>
+            ) : null}
+          </div>
+        </div>
+
         <ul
           className={`space-y-3 ${showAdminTransactions || showLoaded || showUsers ? "hidden" : ""}`}
         >
           {wallets.length === 0 ? (
             <li className="panel p-6 text-sm text-muted-foreground">No wallets tracked yet.</li>
+          ) : visibleWallets.length === 0 ? (
+            <li className="panel p-6 text-sm text-muted-foreground">
+              No tracked wallet matches that search.
+            </li>
           ) : (
-            rankedWallets.map((w, index) => {
+            visibleWallets.map((w, index) => {
               const account = accounts[w.address];
               const lockedBreakdown = account?.lockedBreakdown ?? [];
               const lockedBalance = account?.lockedBalance ?? "0";
