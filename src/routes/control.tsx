@@ -29,6 +29,8 @@ import {
 } from "@/lib/pi";
 import {
   getWalletSecret,
+  exportEncryptedVaultBackup,
+  importEncryptedVaultBackup,
   loadWalletsForUser,
   removeWalletForUser,
   recordWalletPayments,
@@ -254,6 +256,7 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
   const previousBalances = useRef<Record<string, number>>({});
   const hasBalanceBaseline = useRef(false);
   const pollInFlight = useRef(false);
+  const backupInput = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     void Promise.all([loadAllUserWallets(), listUsers()]).then(([seeded, users]) => {
@@ -724,6 +727,36 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
       setWalletSearching(false);
     }
   }
+  async function exportVault() {
+    const password = window.prompt("Create a backup password (12+ characters).");
+    if (!password) return;
+    try {
+      await unlockWalletVaultAutomatically();
+      const backup = await exportEncryptedVaultBackup(password);
+      const url = URL.createObjectURL(new Blob([backup], { type: "application/json" }));
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `pivault-encrypted-backup-${new Date().toISOString().slice(0, 10)}.json`;
+      link.click();
+      URL.revokeObjectURL(url);
+      setMessage("Encrypted wallet backup downloaded. Keep the file and password private.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "The encrypted backup could not be created.");
+    }
+  }
+  async function importVault(file: File) {
+    const password = window.prompt("Enter the backup password.");
+    if (!password) return;
+    try {
+      const imported = await importEncryptedVaultBackup(await file.text(), password);
+      setMessage(`${imported} wallet secret${imported === 1 ? "" : "s"} imported securely.`);
+      setWallets(await loadAllUserWallets());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "The encrypted backup could not be imported.");
+    } finally {
+      if (backupInput.current) backupInput.current.value = "";
+    }
+  }
   const sendAccount = sendWallet ? accounts[sendWallet.address] : undefined;
   const sendBalanceLabel =
     sendAccount === undefined
@@ -812,6 +845,22 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
             </p>
           </div>
           <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
+            <input
+              ref={backupInput}
+              type="file"
+              accept="application/json,.json"
+              className="hidden"
+              onChange={(event) => {
+                const file = event.target.files?.[0];
+                if (file) void importVault(file);
+              }}
+            />
+            <ActionButton tone="ghost" onClick={() => void exportVault()}>
+              Export encrypted vault
+            </ActionButton>
+            <ActionButton tone="ghost" onClick={() => backupInput.current?.click()}>
+              Import encrypted vault
+            </ActionButton>
             <ActionButton tone="ghost" onClick={() => setShowPinEditor((current) => !current)}>
               <KeyRound className="h-4 w-4" aria-hidden="true" />
               <span>{showPinEditor ? "Close update" : "Update passcode"}</span>

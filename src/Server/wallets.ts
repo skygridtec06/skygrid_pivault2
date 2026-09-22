@@ -7,6 +7,7 @@ export type SavedWallet = { address: string; label: string; addedAt: string };
 const sessionSecrets = new Map<string, string>();
 let vaultPassword: string | undefined;
 const AUTO_VAULT_PASSWORD_KEY = "pivault-auto-vault-key";
+const VAULT_BACKUP_VERSION = 1;
 
 function bytesToBase64(bytes: Uint8Array): string {
   let binary = "";
@@ -41,6 +42,12 @@ async function deriveVaultKey(password: string, salt: Uint8Array): Promise<Crypt
   );
 }
 
+function validateVaultPassword(password: string): string {
+  const normalized = password.trim();
+  if (normalized.length < 12) throw new Error("Use a vault password with at least 12 characters.");
+  return normalized;
+}
+
 export function rememberWalletSecret(address: string, secret: string) {
   sessionSecrets.set(address, secret.trim());
 }
@@ -54,9 +61,7 @@ export function forgetWalletSecret(address: string) {
 }
 
 export async function persistWalletSecret(address: string, secret: string, password: string) {
-  if (password.trim().length < 12) {
-    throw new Error("Use a vault password with at least 12 characters.");
-  }
+  password = validateVaultPassword(password);
   const { data: wallet, error: walletError } = await getSupabase()
     .from("wallets")
     .select("id, user_id")
@@ -85,6 +90,71 @@ export async function persistWalletSecret(address: string, secret: string, passw
   if (error) throw new Error(error.message);
   vaultPassword = password;
   sessionSecrets.set(address, secret.trim());
+}
+
+export async function exportEncryptedVaultBackup(password: string): Promise<string> {
+  password = validateVaultPassword(password);
+  const wallets = [...sessionSecrets.entries()].map(([address, secret]) => ({ address, secret }));
+  if (wallets.length === 0)
+    throw new Error("Unlock at least one wallet before exporting a backup.");
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const key = await deriveVaultKey(password, salt);
+  const encrypted = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv: toArrayBuffer(iv) },
+    key,
+    new TextEncoder().encode(
+      JSON.stringify({
+        version: VAULT_BACKUP_VERSION,
+        createdAt: new Date().toISOString(),
+        wallets,
+      }),
+    ),
+  );
+  return JSON.stringify({
+    version: VAULT_BACKUP_VERSION,
+    ciphertext: bytesToBase64(new Uint8Array(encrypted)),
+    salt: bytesToBase64(salt),
+    iv: bytesToBase64(iv),
+  });
+}
+
+export async function importEncryptedVaultBackup(
+  backupText: string,
+  password: string,
+): Promise<number> {
+  password = validateVaultPassword(password);
+  let backup: { version?: number; ciphertext?: string; salt?: string; iv?: string };
+  try {
+    backup = JSON.parse(backupText) as typeof backup;
+  } catch {
+    throw new Error("This is not a valid Pi Vault backup file.");
+  }
+  if (backup.version !== VAULT_BACKUP_VERSION || !backup.ciphertext || !backup.salt || !backup.iv) {
+    throw new Error("This backup file is not supported.");
+  }
+  let payload: { version?: number; wallets?: Array<{ address?: string; secret?: string }> };
+  try {
+    const key = await deriveVaultKey(password, base64ToBytes(backup.salt));
+    const decrypted = await crypto.subtle.decrypt(
+      { name: "AES-GCM", iv: toArrayBuffer(base64ToBytes(backup.iv)) },
+      key,
+      toArrayBuffer(base64ToBytes(backup.ciphertext)),
+    );
+    payload = JSON.parse(new TextDecoder().decode(decrypted)) as typeof payload;
+  } catch {
+    throw new Error("The backup password is incorrect or the backup is corrupted.");
+  }
+  if (payload.version !== VAULT_BACKUP_VERSION || !Array.isArray(payload.wallets)) {
+    throw new Error("This backup payload is not supported.");
+  }
+  let imported = 0;
+  for (const wallet of payload.wallets) {
+    if (!wallet.address || !wallet.secret) continue;
+    await persistWalletSecret(wallet.address, wallet.secret, getOrCreateVaultPassword());
+    imported += 1;
+  }
+  return imported;
 }
 
 export async function unlockWalletVault(password: string): Promise<number> {
