@@ -24,7 +24,7 @@ function AdminPage() {
   const [copiedAddress, setCopiedAddress] = useState<string | null>(null);
 
   useEffect(() => {
-    setWallets(loadWallets());
+    void loadWallets().then(setWallets);
   }, []);
 
   const todayKey = localDateKey(new Date());

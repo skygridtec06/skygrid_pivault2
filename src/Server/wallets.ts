@@ -1,114 +1,108 @@
-// Saved wallet list and the local secret-key vault for wallets added on this device.
+import { getSupabase } from "@/lib/supabase";
 import { getCurrentUser } from "@/lib/auth";
+import type { PiPayment } from "./pi";
 
-export type SavedWallet = {
-  address: string;
-  label: string;
-  addedAt: string;
-};
+export type SavedWallet = { address: string; label: string; addedAt: string };
 
-const KEY_PREFIX = "pi_saved_wallets_v1:";
-const SECRET_KEY_PREFIX = "pi_wallet_secret_v1:";
 const sessionSecrets = new Map<string, string>();
 
-function storageKey(username = getCurrentUser()?.username) {
-  return username ? `${KEY_PREFIX}${username}` : `${KEY_PREFIX}guest`;
-}
-
 export function rememberWalletSecret(address: string, secret: string) {
-  const normalizedSecret = secret.trim();
-  sessionSecrets.set(address, normalizedSecret);
-  const username = getCurrentUser()?.username;
-  if (typeof window !== "undefined" && username) {
-    window.localStorage.setItem(`${SECRET_KEY_PREFIX}${username}:${address}`, normalizedSecret);
-  }
+  sessionSecrets.set(address, secret.trim());
 }
 
 export function getWalletSecret(address: string): string | undefined {
-  const inMemory = sessionSecrets.get(address);
-  if (inMemory) return inMemory;
-  if (typeof window === "undefined") return undefined;
-
-  for (let index = 0; index < window.localStorage.length; index += 1) {
-    const key = window.localStorage.key(index);
-    if (!key?.startsWith(SECRET_KEY_PREFIX) || !key.endsWith(`:${address}`)) continue;
-    const secret = window.localStorage.getItem(key);
-    if (secret) {
-      sessionSecrets.set(address, secret);
-      return secret;
-    }
-  }
-  return undefined;
+  return sessionSecrets.get(address);
 }
 
 export function forgetWalletSecret(address: string) {
   sessionSecrets.delete(address);
-  if (typeof window === "undefined") return;
-  const keysToRemove: string[] = [];
-  for (let index = 0; index < window.localStorage.length; index += 1) {
-    const key = window.localStorage.key(index);
-    if (key?.startsWith(SECRET_KEY_PREFIX) && key.endsWith(`:${address}`)) {
-      keysToRemove.push(key);
-    }
-  }
-  keysToRemove.forEach((key) => window.localStorage.removeItem(key));
 }
 
-export function loadWallets(): SavedWallet[] {
-  if (typeof window === "undefined") return [];
-  try {
-    const raw = window.localStorage.getItem(storageKey());
-    if (!raw) return [];
-    const parsed = JSON.parse(raw) as SavedWallet[];
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
+export async function loadWallets(): Promise<SavedWallet[]> {
+  const user = await getCurrentUser();
+  if (!user) return [];
+  const { data, error } = await getSupabase()
+    .from("wallets")
+    .select("address, label, added_at")
+    .order("added_at", { ascending: false });
+  if (error) throw new Error(error.message);
+  return data.map((row) => ({ address: row.address, label: row.label, addedAt: row.added_at }));
 }
 
-function persist(list: SavedWallet[]) {
-  window.localStorage.setItem(storageKey(), JSON.stringify(list));
+export async function loadWalletsForUser(username: string): Promise<SavedWallet[]> {
+  const { data: profile, error: profileError } = await getSupabase()
+    .from("profiles")
+    .select("id, user_id")
+    .eq("username", username.trim().toLowerCase())
+    .single();
+  if (profileError) throw new Error(profileError.message);
+  const { data, error } = await getSupabase()
+    .from("wallets")
+    .select("address, label, added_at")
+    .eq("user_id", profile.id)
+    .order("added_at", { ascending: false });
+  if (error) throw new Error(error.message);
+  return data.map((row) => ({ address: row.address, label: row.label, addedAt: row.added_at }));
 }
 
-export function loadWalletsForUser(username: string): SavedWallet[] {
-  if (typeof window === "undefined") return [];
-  try {
-    const raw = window.localStorage.getItem(storageKey(username));
-    if (!raw) return [];
-    const parsed = JSON.parse(raw) as SavedWallet[];
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
+export async function addWallet(address: string, label: string): Promise<SavedWallet[]> {
+  const { error } = await getSupabase()
+    .from("wallets")
+    .upsert({ address, label: label || "Wallet" }, { onConflict: "user_id,address" });
+  if (error) throw new Error(error.message);
+  return loadWallets();
 }
 
-export function addWallet(address: string, label: string): SavedWallet[] {
-  const list = loadWallets();
-  if (!list.some((w) => w.address === address)) {
-    list.unshift({ address, label: label || "Wallet", addedAt: new Date().toISOString() });
-    persist(list);
-  }
-  return list;
-}
-
-export function removeWallet(address: string): SavedWallet[] {
+export async function removeWallet(address: string): Promise<SavedWallet[]> {
   forgetWalletSecret(address);
-  const list = loadWallets().filter((w) => w.address !== address);
-  persist(list);
-  return list;
+  const { error } = await getSupabase().from("wallets").delete().eq("address", address);
+  if (error) throw new Error(error.message);
+  return loadWallets();
 }
 
-export function removeWalletForUser(username: string, address: string): SavedWallet[] {
+export async function removeWalletForUser(
+  username: string,
+  address: string,
+): Promise<SavedWallet[]> {
+  const wallets = await loadWalletsForUser(username);
+  const wallet = wallets.find((item) => item.address === address);
+  if (!wallet) return wallets;
+  const { error } = await getSupabase().from("wallets").delete().eq("address", address);
+  if (error) throw new Error(error.message);
   forgetWalletSecret(address);
-  const list = loadWalletsForUser(username).filter((wallet) => wallet.address !== address);
-  if (typeof window !== "undefined") {
-    window.localStorage.setItem(storageKey(username), JSON.stringify(list));
-  }
-  return list;
+  return loadWalletsForUser(username);
 }
 
-export function renameWallet(address: string, label: string): SavedWallet[] {
-  const list = loadWallets().map((w) => (w.address === address ? { ...w, label } : w));
-  persist(list);
-  return list;
+export async function renameWallet(address: string, label: string): Promise<SavedWallet[]> {
+  const { error } = await getSupabase().from("wallets").update({ label }).eq("address", address);
+  if (error) throw new Error(error.message);
+  return loadWallets();
+}
+
+export async function recordWalletPayments(address: string, payments: PiPayment[]): Promise<void> {
+  if (payments.length === 0) return;
+  const { data: wallet, error: walletError } = await getSupabase()
+    .from("wallets")
+    .select("id")
+    .eq("address", address)
+    .single();
+  if (walletError) throw new Error(walletError.message);
+
+  const walletRecord = wallet as { id: string; user_id: string };
+  const rows = payments.map((payment) => ({
+    wallet_id: walletRecord.id,
+    user_id: walletRecord.user_id,
+    external_id: payment.id,
+    transaction_type: payment.type,
+    direction: payment.direction,
+    counterparty: payment.counterparty,
+    amount: Number(payment.amount) || 0,
+    asset: payment.asset,
+    created_at: payment.createdAt,
+    transaction_hash: payment.hash,
+  }));
+  const { error } = await getSupabase()
+    .from("wallet_transactions")
+    .upsert(rows, { onConflict: "user_id,external_id" });
+  if (error) throw new Error(error.message);
 }

@@ -130,8 +130,9 @@ function RootComponent() {
   const [user, setUser] = useState<AuthUser | null>(null);
 
   useEffect(() => {
-    setUser(getCurrentUser());
-    setAuthReady(true);
+    void getCurrentUser()
+      .then(setUser)
+      .finally(() => setAuthReady(true));
   }, []);
 
   if (!authReady) {
@@ -175,8 +176,7 @@ function RootComponent() {
                     type="button"
                     className="rounded-lg px-3 py-2 text-muted-foreground transition hover:text-foreground"
                     onClick={() => {
-                      logout();
-                      setUser(null);
+                      void logout().then(() => setUser(null));
                     }}
                   >
                     Log out

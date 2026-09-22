@@ -31,6 +31,7 @@ import {
   getWalletSecret,
   loadWalletsForUser,
   removeWalletForUser,
+  recordWalletPayments,
   type SavedWallet,
 } from "@/lib/wallets";
 
@@ -60,15 +61,17 @@ type AdminWallet = SavedWallet & {
   ownerUsername: string;
 };
 
-function loadAllUserWallets(): AdminWallet[] {
-  return listUsers()
-    .flatMap((user) =>
-      loadWalletsForUser(user.username).map((wallet) => ({
+async function loadAllUserWallets(): Promise<AdminWallet[]> {
+  const users = await listUsers();
+  const wallets = await Promise.all(
+    users.map(async (user) =>
+      (await loadWalletsForUser(user.username)).map((wallet) => ({
         ...wallet,
         ownerUsername: user.username,
       })),
-    )
-    .sort((a, b) => Date.parse(b.addedAt) - Date.parse(a.addedAt));
+    ),
+  );
+  return wallets.flat().sort((a, b) => Date.parse(b.addedAt) - Date.parse(a.addedAt));
 }
 
 function loadAdminTransactions(): AdminTransaction[] {
@@ -212,6 +215,7 @@ function ControlPage() {
 
 function AdminConsole({ onLock }: { onLock: () => void }) {
   const [wallets, setWallets] = useState<AdminWallet[]>([]);
+  const [userCount, setUserCount] = useState(0);
   const [accounts, setAccounts] = useState<Record<string, PiAccount | null>>({});
   const [refreshing, setRefreshing] = useState(false);
   const [message, setMessage] = useState("");
@@ -248,8 +252,15 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
   const pollInFlight = useRef(false);
 
   useEffect(() => {
-    const seeded = loadAllUserWallets();
-    setWallets(seeded);
+    void Promise.all([loadAllUserWallets(), listUsers()]).then(([seeded, users]) => {
+      setWallets(seeded);
+      setUserCount(users.length);
+      setRevealedSecrets(
+        Object.fromEntries(
+          seeded.filter((w) => Boolean(getWalletSecret(w.address))).map((w) => [w.address, true]),
+        ),
+      );
+    });
     setAdminTransactions(loadAdminTransactions());
     try {
       const saved = window.localStorage.getItem(BALANCE_BASELINE_KEY);
@@ -262,11 +273,6 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
       previousBalances.current = {};
       hasBalanceBaseline.current = false;
     }
-    setRevealedSecrets(
-      Object.fromEntries(
-        seeded.filter((w) => Boolean(getWalletSecret(w.address))).map((w) => [w.address, true]),
-      ),
-    );
   }, []);
 
   async function refreshAll(list = wallets) {
@@ -296,6 +302,7 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
       list.map(async (wallet) => {
         try {
           const payments = await loadPayments(wallet.address);
+          await recordWalletPayments(wallet.address, payments);
           return payments
             .filter(
               (payment) =>
@@ -358,12 +365,10 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
           if (hasBalanceBaseline.current && previous !== undefined && balance > previous) {
             try {
               await sendBalanceAlert({
-                data: {
-                  address,
-                  amount: balance - previous,
-                  availableBalance: balance,
-                  receivedAt: new Date().toISOString(),
-                },
+                address,
+                amount: balance - previous,
+                availableBalance: balance,
+                receivedAt: new Date().toISOString(),
               });
               setMessage(
                 `SMS alert sent for ${balance - previous} Pi received by ${shortenAddress(address)}.`,
@@ -522,6 +527,7 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
     setError("");
     try {
       const payments = await loadPayments(address);
+      await recordWalletPayments(address, payments);
       setTransactions((current) => ({ ...current, [address]: payments }));
     } catch (err) {
       setError(readableError(err));
@@ -811,7 +817,7 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
           />
           <Stat
             label="Users"
-            value={String(listUsers().length)}
+            value={String(userCount)}
             icon={UsersRound}
             onClick={() => {
               setShowUsers(true);
@@ -822,7 +828,12 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
         </div>
         {showUsers ? (
           <UserManagement
-            onUsersChanged={() => setWallets(loadAllUserWallets())}
+            onUsersChanged={() => {
+              void Promise.all([loadAllUserWallets(), listUsers()]).then(([nextWallets, users]) => {
+                setWallets(nextWallets);
+                setUserCount(users.length);
+              });
+            }}
             onClose={() => setShowUsers(false)}
           />
         ) : null}
@@ -1192,7 +1203,7 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
       {walletPendingRemoval ? (
         <DestructiveActionModal
           title="Remove wallet"
-          description={`Enter your admin PIN to remove ${wallet.label} from ${wallet.ownerUsername}.`}
+          description={`Enter your admin PIN to remove ${walletPendingRemoval.label} from ${walletPendingRemoval.ownerUsername}.`}
           confirmLabel="Remove wallet"
           onCancel={() => setWalletPendingRemoval(null)}
           onConfirm={() => confirmRemoveWallet(walletPendingRemoval)}
@@ -1210,6 +1221,7 @@ function UserManagement({
   onClose: () => void;
 }) {
   const [users, setUsers] = useState<ManagedUser[]>([]);
+  const [walletCounts, setWalletCounts] = useState<Record<string, number>>({});
   const [selectedUser, setSelectedUser] = useState<string | null>(null);
   const [userWallets, setUserWallets] = useState<SavedWallet[]>([]);
   const [startDate, setStartDate] = useState("");
@@ -1221,12 +1233,21 @@ function UserManagement({
   const [userPendingRemoval, setUserPendingRemoval] = useState<string | null>(null);
 
   useEffect(() => {
-    setUsers(listUsers());
+    void listUsers().then(async (nextUsers) => {
+      setUsers(nextUsers);
+      const counts = await Promise.all(
+        nextUsers.map(
+          async (user) =>
+            [user.username, (await loadWalletsForUser(user.username)).length] as const,
+        ),
+      );
+      setWalletCounts(Object.fromEntries(counts));
+    });
   }, []);
 
-  function selectUser(value: string) {
+  async function selectUser(value: string) {
     setSelectedUser(value);
-    setUserWallets(loadWalletsForUser(value));
+    setUserWallets(await loadWalletsForUser(value));
     setStartDate("");
     setEndDate("");
     setError("");
@@ -1238,7 +1259,9 @@ function UserManagement({
     setNotice("");
     try {
       const user = await createUser(username, pin);
-      setUsers(listUsers());
+      const nextUsers = await listUsers();
+      setUsers(nextUsers);
+      setWalletCounts((current) => ({ ...current, [user.username]: 0 }));
       onUsersChanged();
       setUsername("");
       setPin("");
@@ -1252,16 +1275,20 @@ function UserManagement({
     setUserPendingRemoval(value);
   }
 
-  function confirmRemoveUser(value: string) {
-    deleteUser(value);
-    setUsers(listUsers());
-    onUsersChanged();
-    if (selectedUser === value) {
-      setSelectedUser(null);
-      setUserWallets([]);
+  async function confirmRemoveUser(value: string) {
+    try {
+      await deleteUser(value);
+      setUsers(await listUsers());
+      onUsersChanged();
+      if (selectedUser === value) {
+        setSelectedUser(null);
+        setUserWallets([]);
+      }
+      setNotice(`${value} was deleted.`);
+      setUserPendingRemoval(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "The user could not be deleted.");
     }
-    setNotice(`${value} was deleted.`);
-    setUserPendingRemoval(null);
   }
 
   const filteredWallets = userWallets.filter((wallet) => {
@@ -1344,7 +1371,7 @@ function UserManagement({
                 <span className="truncate">{user.username}</span>
               </span>
               <span className="shrink-0 text-sm text-accent">
-                {loadWalletsForUser(user.username).length} wallets
+                {walletCounts[user.username] ?? 0} wallets
               </span>
             </div>
             <p className="mt-3 flex items-center gap-1.5 text-xs text-muted-foreground">

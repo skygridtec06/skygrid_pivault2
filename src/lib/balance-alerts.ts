@@ -5,7 +5,8 @@ type BalanceAlertData = {
   receivedAt: string;
 };
 
-const backendUrl = import.meta.env.VITE_BACKEND_URL ?? "https://skygrid-pivault-backend.vercel.app";
+const backendUrl =
+  import.meta.env["VITE_BACKEND_URL"] ?? "https://skygrid-pivault-backend.vercel.app";
 
 export async function sendBalanceAlert(data: BalanceAlertData): Promise<void> {
   const response = await fetch(`${backendUrl}/api/balance-alert`, {

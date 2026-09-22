@@ -12,7 +12,7 @@ import {
   type PiAccount,
   type PiPayment,
 } from "@/lib/pi";
-import { addWallet, loadWallets, rememberWalletSecret } from "@/lib/wallets";
+import { addWallet, loadWallets, recordWalletPayments, rememberWalletSecret } from "@/lib/wallets";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -58,6 +58,7 @@ function WalletPage() {
 
   async function refresh(publicKey: string) {
     const [acct, pays] = await Promise.all([loadAccount(publicKey), loadPayments(publicKey)]);
+    await recordWalletPayments(publicKey, pays);
     setAccount(acct);
     setPayments(pays);
   }
@@ -71,7 +72,7 @@ function WalletPage() {
       const signingSecret =
         credentialType === "mnemonic" ? await secretFromMnemonic(secret) : secret.trim();
       const publicKey = await publicKeyFromSecret(signingSecret);
-      const existingWallets = loadWallets();
+      const existingWallets = await loadWallets();
       const alreadyExists = existingWallets.some((wallet) => wallet.address === publicKey);
 
       if (alreadyExists) {
@@ -83,9 +84,13 @@ function WalletPage() {
         return;
       }
 
-      const [walletAccount] = await Promise.all([loadAccount(publicKey), loadPayments(publicKey)]);
+      const [walletAccount, walletPayments] = await Promise.all([
+        loadAccount(publicKey),
+        loadPayments(publicKey),
+      ]);
+      await recordWalletPayments(publicKey, walletPayments);
       const nextLabel = label.trim() || `Wallet ${shortenAddress(publicKey, 4)}`;
-      addWallet(publicKey, nextLabel);
+      await addWallet(publicKey, nextLabel);
       rememberWalletSecret(publicKey, signingSecret);
       setAccount(null);
       setPayments([]);
@@ -139,10 +144,10 @@ function WalletPage() {
     }
   }
 
-  function save() {
+  async function save() {
     if (!account) return;
     const walletLabel = (label || `Wallet ${shortenAddress(account.publicKey, 4)}`).trim();
-    const existingWallets = loadWallets();
+    const existingWallets = await loadWallets();
     if (existingWallets.some((wallet) => wallet.address === account.publicKey)) {
       setStatusModal({
         type: "error",
@@ -150,7 +155,7 @@ function WalletPage() {
       });
       return;
     }
-    addWallet(account.publicKey, walletLabel);
+    await addWallet(account.publicKey, walletLabel);
     setLabel(walletLabel);
     setNotice("Saved to your dashboard.");
     const availableBalance = Number(account.balance);
