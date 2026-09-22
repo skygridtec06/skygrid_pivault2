@@ -1,5 +1,8 @@
 {
   "name": "skygrid-pivault-backend",
   "private": true,
-  "type": "module"
+  "type": "module",
+  "scripts": {
+    "worker": "node --experimental-strip-types worker/index.ts"
+  }
 }
