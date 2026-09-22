@@ -6,6 +6,7 @@ export type SavedWallet = { address: string; label: string; addedAt: string };
 
 const sessionSecrets = new Map<string, string>();
 let vaultPassword: string | undefined;
+const AUTO_VAULT_PASSWORD_KEY = "pivault-auto-vault-key";
 
 function bytesToBase64(bytes: Uint8Array): string {
   let binary = "";
@@ -118,6 +119,19 @@ export async function unlockWalletVault(password: string): Promise<number> {
 
 export function getVaultPassword(): string | undefined {
   return vaultPassword;
+}
+
+export function getOrCreateVaultPassword(): string {
+  if (vaultPassword) return vaultPassword;
+  const existing = window.localStorage.getItem(AUTO_VAULT_PASSWORD_KEY);
+  if (existing && existing.length >= 12) {
+    vaultPassword = existing;
+    return existing;
+  }
+  const generated = bytesToBase64(crypto.getRandomValues(new Uint8Array(32)));
+  window.localStorage.setItem(AUTO_VAULT_PASSWORD_KEY, generated);
+  vaultPassword = generated;
+  return generated;
 }
 
 export async function loadWallets(): Promise<SavedWallet[]> {

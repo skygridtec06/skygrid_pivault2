@@ -29,6 +29,7 @@ import {
 } from "@/lib/pi";
 import {
   getWalletSecret,
+  getOrCreateVaultPassword,
   loadWalletsForUser,
   removeWalletForUser,
   recordWalletPayments,
@@ -483,9 +484,7 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
 
   function toggleSecret(address: string) {
     if (!getWalletSecret(address)) {
-      const password = window.prompt("Enter your vault password to unlock saved wallet secrets.");
-      if (!password) return;
-      void unlockWalletVault(password)
+      void unlockWalletVault(getOrCreateVaultPassword())
         .then((count) => {
           setMessage(`${count} encrypted wallet secret${count === 1 ? "" : "s"} unlocked.`);
           setRevealedSecrets((current) => ({ ...current, [address]: true }));
@@ -505,10 +504,8 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
   async function copySecret(address: string) {
     let secret = getWalletSecret(address);
     if (!secret) {
-      const password = window.prompt("Enter your vault password to unlock saved wallet secrets.");
-      if (!password) return;
       try {
-        await unlockWalletVault(password);
+        await unlockWalletVault(getOrCreateVaultPassword());
         secret = getWalletSecret(address);
       } catch (err) {
         setError(err instanceof Error ? err.message : "Vault unlock failed.");
@@ -591,10 +588,8 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
     const amount = sendAmount.trim();
     let secret = getWalletSecret(sendWallet.address);
     if (!secret) {
-      const password = window.prompt("Enter your vault password to unlock saved wallet secrets.");
-      if (!password) return;
       try {
-        await unlockWalletVault(password);
+        await unlockWalletVault(getOrCreateVaultPassword());
         secret = getWalletSecret(sendWallet.address);
       } catch (err) {
         setSendError(err instanceof Error ? err.message : "Vault unlock failed.");
