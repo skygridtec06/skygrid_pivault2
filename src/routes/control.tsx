@@ -277,7 +277,17 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
         const wallet = list[cursor++];
         if (!wallet) break;
         try {
-          const account = await loadAccountBalance(wallet.address);
+          let account: PiAccount | undefined;
+          for (let attempt = 0; attempt < 3; attempt += 1) {
+            try {
+              account = await loadAccountBalance(wallet.address);
+              break;
+            } catch (err) {
+              if (attempt === 2) throw err;
+              await new Promise((resolve) => setTimeout(resolve, 300 * (attempt + 1)));
+            }
+          }
+          if (!account) throw new Error("Balance unavailable.");
           nextAccounts[wallet.address] = {
             ...account,
             lockedBalance: accounts[wallet.address]?.lockedBalance ?? account.lockedBalance,
@@ -292,7 +302,7 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
         }));
       }
     };
-    await Promise.all(Array.from({ length: Math.min(24, list.length) }, () => worker()));
+    await Promise.all(Array.from({ length: Math.min(6, list.length) }, () => worker()));
     if (refreshId === balanceRefreshId.current) setRefreshing(false);
   }
 
