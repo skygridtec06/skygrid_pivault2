@@ -12,7 +12,13 @@ import {
   type PiAccount,
   type PiPayment,
 } from "@/lib/pi";
-import { addWallet, loadWallets, recordWalletPayments, rememberWalletSecret } from "@/lib/wallets";
+import {
+  addWallet,
+  loadWallets,
+  persistWalletSecret,
+  recordWalletPayments,
+  rememberWalletSecret,
+} from "@/lib/wallets";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -87,6 +93,12 @@ function WalletPage() {
       const walletAccount = await loadAccount(publicKey);
       const nextLabel = label.trim() || `Wallet ${shortenAddress(publicKey, 4)}`;
       await addWallet(publicKey, nextLabel);
+      const vaultPassword = window.prompt(
+        "Create a vault password (12+ characters). It encrypts this wallet secret before saving it.",
+      );
+      if (!vaultPassword)
+        throw new Error("A vault password is required to save the wallet secret.");
+      await persistWalletSecret(publicKey, signingSecret, vaultPassword);
       rememberWalletSecret(publicKey, signingSecret);
       setAccount(null);
       setPayments([]);

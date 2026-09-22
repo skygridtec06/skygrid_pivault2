@@ -32,6 +32,7 @@ import {
   loadWalletsForUser,
   removeWalletForUser,
   recordWalletPayments,
+  unlockWalletVault,
   type SavedWallet,
 } from "@/lib/wallets";
 
@@ -482,9 +483,16 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
 
   function toggleSecret(address: string) {
     if (!getWalletSecret(address)) {
-      setError(
-        "This wallet secret is not available on this device. Add the wallet again to reveal it.",
-      );
+      const password = window.prompt("Enter your vault password to unlock saved wallet secrets.");
+      if (!password) return;
+      void unlockWalletVault(password)
+        .then((count) => {
+          setMessage(`${count} encrypted wallet secret${count === 1 ? "" : "s"} unlocked.`);
+          setRevealedSecrets((current) => ({ ...current, [address]: true }));
+        })
+        .catch((err: unknown) =>
+          setError(err instanceof Error ? err.message : "Vault unlock failed."),
+        );
       return;
     }
     setRevealedSecrets((current) => ({
@@ -495,14 +503,23 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
   }
 
   async function copySecret(address: string) {
-    const secret = getWalletSecret(address);
+    let secret = getWalletSecret(address);
     if (!secret) {
-      setError(
-        "This wallet secret is not available on this device. Add the wallet again to copy it.",
-      );
-      return;
+      const password = window.prompt("Enter your vault password to unlock saved wallet secrets.");
+      if (!password) return;
+      try {
+        await unlockWalletVault(password);
+        secret = getWalletSecret(address);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Vault unlock failed.");
+        return;
+      }
     }
 
+    if (!secret) {
+      setError("No encrypted secret was found for this wallet.");
+      return;
+    }
     try {
       await navigator.clipboard.writeText(secret);
       setCopiedSecret(address);
@@ -572,12 +589,21 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
     setSendError("");
     const destination = sendDestination.trim();
     const amount = sendAmount.trim();
-    const secret = getWalletSecret(sendWallet.address);
+    let secret = getWalletSecret(sendWallet.address);
     if (!secret) {
-      setSendError(
-        "This wallet is not available for signing on this device. Add it again before sending.",
-      );
-      return;
+      const password = window.prompt("Enter your vault password to unlock saved wallet secrets.");
+      if (!password) return;
+      try {
+        await unlockWalletVault(password);
+        secret = getWalletSecret(sendWallet.address);
+      } catch (err) {
+        setSendError(err instanceof Error ? err.message : "Vault unlock failed.");
+        return;
+      }
+      if (!secret) {
+        setSendError("No encrypted secret was found for this wallet.");
+        return;
+      }
     }
     if (!destination) {
       setSendError("Enter a destination address.");
