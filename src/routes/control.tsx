@@ -63,6 +63,10 @@ type AdminWallet = SavedWallet & {
   ownerUsername: string;
 };
 
+function walletSelectionKey(wallet: Pick<AdminWallet, "ownerUsername" | "address">): string {
+  return JSON.stringify([wallet.ownerUsername, wallet.address]);
+}
+
 async function loadAllUserWallets(): Promise<AdminWallet[]> {
   const users = await listUsers();
   const wallets = await Promise.all(
@@ -249,7 +253,9 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
   );
   const [loadedLoading, setLoadedLoading] = useState(false);
   const [showLoaded, setShowLoaded] = useState(false);
-  const [walletPendingRemoval, setWalletPendingRemoval] = useState<AdminWallet | null>(null);
+  const [markingWallets, setMarkingWallets] = useState(false);
+  const [selectedWallets, setSelectedWallets] = useState<string[]>([]);
+  const [walletsPendingRemoval, setWalletsPendingRemoval] = useState<AdminWallet[] | null>(null);
   const balanceRefreshId = useRef(0);
   const backupInput = useRef<HTMLInputElement>(null);
 
@@ -349,39 +355,43 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
   }, [wallets.length]);
 
   function removeOne(wallet: AdminWallet) {
-    setWalletPendingRemoval(wallet);
+    setError("");
+    setWalletsPendingRemoval([wallet]);
   }
 
-  function confirmRemoveWallet(wallet: AdminWallet) {
-    try {
-      removeWalletForUser(wallet.ownerUsername, wallet.address);
-      setWallets((current) =>
-        current.filter(
-          (item) => item.ownerUsername !== wallet.ownerUsername || item.address !== wallet.address,
-        ),
-      );
-      setAccounts((current) => {
-        const next = { ...current };
-        delete next[wallet.address];
-        return next;
-      });
-      setTransactions((current) => {
-        const next = { ...current };
-        delete next[wallet.address];
-        return next;
-      });
-      setLoadedPayments((current) =>
-        current.filter(
-          (record) =>
-            record.wallet.ownerUsername !== wallet.ownerUsername ||
-            record.wallet.address !== wallet.address,
-        ),
-      );
-      setMessage("Wallet removed.");
-      setWalletPendingRemoval(null);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "The wallet could not be removed.");
+  function applyWalletRemoval(removedWallets: AdminWallet[]) {
+    const removedKeys = new Set(removedWallets.map(walletSelectionKey));
+    setWallets((current) =>
+      current.filter((wallet) => !removedKeys.has(walletSelectionKey(wallet))),
+    );
+    setAccounts((current) => {
+      const next = { ...current };
+      for (const wallet of removedWallets) delete next[wallet.address];
+      return next;
+    });
+    setTransactions((current) => {
+      const next = { ...current };
+      for (const wallet of removedWallets) delete next[wallet.address];
+      return next;
+    });
+    setLoadedPayments((current) =>
+      current.filter((record) => !removedKeys.has(walletSelectionKey(record.wallet))),
+    );
+    setSelectedWallets((current) => current.filter((key) => !removedKeys.has(key)));
+  }
+
+  async function confirmRemoveWallets(pendingWallets: AdminWallet[]) {
+    let removedCount = 0;
+    const currentWalletKeys = new Set(wallets.map(walletSelectionKey));
+    for (const wallet of pendingWallets) {
+      if (!currentWalletKeys.has(walletSelectionKey(wallet))) continue;
+      await removeWalletForUser(wallet.ownerUsername, wallet.address);
+      applyWalletRemoval([wallet]);
+      removedCount += 1;
     }
+    setMessage(removedCount === 1 ? "Wallet removed." : `${removedCount} wallets removed.`);
+    setMarkingWallets(false);
+    setWalletsPendingRemoval(null);
   }
 
   function removeAdminTransaction(id: string) {
@@ -1069,6 +1079,65 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
           </div>
         </div>
 
+        <div
+          className={`mb-4 flex flex-wrap items-center justify-between gap-3 ${
+            showAdminTransactions || showLoaded || showUsers ? "hidden" : ""
+          }`}
+        >
+          <ActionButton
+            tone="ghost"
+            onClick={() => {
+              setMarkingWallets((current) => !current);
+              setSelectedWallets([]);
+            }}
+          >
+            {markingWallets ? "Cancel marking" : "Mark wallets"}
+          </ActionButton>
+          {markingWallets ? (
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-sm text-muted-foreground">
+                {selectedWallets.length} selected
+              </span>
+              <ActionButton
+                tone="ghost"
+                onClick={() => {
+                  const visibleKeys = visibleWallets.map(walletSelectionKey);
+                  const allVisibleSelected =
+                    visibleKeys.length > 0 &&
+                    visibleKeys.every((key) => selectedWallets.includes(key));
+                  setSelectedWallets((current) =>
+                    allVisibleSelected
+                      ? current.filter((key) => !visibleKeys.includes(key))
+                      : [...new Set([...current, ...visibleKeys])],
+                  );
+                }}
+                disabled={visibleWallets.length === 0}
+              >
+                {visibleWallets.length > 0 &&
+                visibleWallets.every((wallet) =>
+                  selectedWallets.includes(walletSelectionKey(wallet)),
+                )
+                  ? "Unmark visible"
+                  : "Mark visible"}
+              </ActionButton>
+              <ActionButton
+                tone="accent"
+                onClick={() => {
+                  const selected = new Set(selectedWallets);
+                  setError("");
+                  setWalletsPendingRemoval(
+                    wallets.filter((wallet) => selected.has(walletSelectionKey(wallet))),
+                  );
+                }}
+                disabled={selectedWallets.length === 0}
+              >
+                <Trash2 className="h-4 w-4" aria-hidden="true" />
+                Delete marked
+              </ActionButton>
+            </div>
+          ) : null}
+        </div>
+
         <ul
           className={`space-y-3 ${showAdminTransactions || showLoaded || showUsers ? "hidden" : ""}`}
         >
@@ -1083,19 +1152,44 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
               const account = accounts[w.address];
               const lockedBreakdown = account?.lockedBreakdown ?? [];
               const lockedBalance = account?.lockedBalance ?? "0";
+              const selectionKey = walletSelectionKey(w);
 
               return (
-                <li key={w.address} className="panel flex min-w-0 flex-col gap-4 p-4 sm:p-5">
-                  <div className="min-w-0">
-                    <p className="mb-1 text-xs font-semibold uppercase tracking-[0.16em] text-accent">
-                      Rank {index + 1}
-                    </p>
-                    <p className="font-semibold">{w.label}</p>
-                    <p className="break-all font-mono text-xs text-muted-foreground">{w.address}</p>
-                    <p className="text-xs text-accent">Added by {w.ownerUsername}</p>
-                    <ActionButton tone="ghost" onClick={() => void copyAddress(w.address)}>
-                      {copiedAddress === w.address ? "Address copied" : "Copy address"}
-                    </ActionButton>
+                <li
+                  key={selectionKey}
+                  className={`panel flex min-w-0 flex-col gap-4 p-4 sm:p-5 ${
+                    selectedWallets.includes(selectionKey) ? "border-accent/70 bg-accent/5" : ""
+                  }`}
+                >
+                  <div className="flex min-w-0 items-start gap-3">
+                    {markingWallets ? (
+                      <input
+                        type="checkbox"
+                        aria-label={`Mark ${w.label} from ${w.ownerUsername}`}
+                        checked={selectedWallets.includes(selectionKey)}
+                        onChange={(event) =>
+                          setSelectedWallets((current) =>
+                            event.target.checked
+                              ? [...current, selectionKey]
+                              : current.filter((key) => key !== selectionKey),
+                          )
+                        }
+                        className="mt-1 h-4 w-4 shrink-0 accent-[hsl(var(--accent))]"
+                      />
+                    ) : null}
+                    <div className="min-w-0">
+                      <p className="mb-1 text-xs font-semibold uppercase tracking-[0.16em] text-accent">
+                        Rank {index + 1}
+                      </p>
+                      <p className="font-semibold">{w.label}</p>
+                      <p className="break-all font-mono text-xs text-muted-foreground">
+                        {w.address}
+                      </p>
+                      <p className="text-xs text-accent">Added by {w.ownerUsername}</p>
+                      <ActionButton tone="ghost" onClick={() => void copyAddress(w.address)}>
+                        {copiedAddress === w.address ? "Address copied" : "Copy address"}
+                      </ActionButton>
+                    </div>
                   </div>
                   <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center sm:gap-3">
                     <span className="text-lg font-bold text-accent sm:text-xl">
@@ -1275,13 +1369,21 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
           )}
         </ul>
       </div>
-      {walletPendingRemoval ? (
+      {walletsPendingRemoval ? (
         <DestructiveActionModal
-          title="Remove wallet"
-          description={`Enter your admin PIN to remove ${walletPendingRemoval.label} from ${walletPendingRemoval.ownerUsername}.`}
-          confirmLabel="Remove wallet"
-          onCancel={() => setWalletPendingRemoval(null)}
-          onConfirm={() => confirmRemoveWallet(walletPendingRemoval)}
+          title={walletsPendingRemoval.length === 1 ? "Remove wallet" : "Delete marked wallets"}
+          description={
+            walletsPendingRemoval.length === 1
+              ? `Enter your admin PIN to remove ${walletsPendingRemoval[0]?.label} from ${walletsPendingRemoval[0]?.ownerUsername}.`
+              : `Enter your admin PIN to permanently remove ${walletsPendingRemoval.length} selected wallets.`
+          }
+          confirmLabel={
+            walletsPendingRemoval.length === 1
+              ? "Remove wallet"
+              : `Delete ${walletsPendingRemoval.length} wallets`
+          }
+          onCancel={() => setWalletsPendingRemoval(null)}
+          onConfirm={() => confirmRemoveWallets(walletsPendingRemoval)}
         />
       ) : null}
     </>
@@ -1527,18 +1629,27 @@ function DestructiveActionModal({
   description: string;
   confirmLabel: string;
   onCancel: () => void;
-  onConfirm: () => void;
+  onConfirm: () => void | Promise<void>;
 }) {
   const [pin, setPin] = useState("");
   const [error, setError] = useState("");
+  const [confirming, setConfirming] = useState(false);
 
-  function confirm() {
+  async function confirm() {
     const configuredPin = window.localStorage.getItem(PIN_KEY);
     if (!configuredPin || pin !== configuredPin) {
       setError("Incorrect admin PIN.");
       return;
     }
-    onConfirm();
+    setConfirming(true);
+    setError("");
+    try {
+      await onConfirm();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "The wallet could not be removed.");
+    } finally {
+      setConfirming(false);
+    }
   }
 
   return (
@@ -1573,11 +1684,11 @@ function DestructiveActionModal({
           {error ? <p className="mt-2 text-sm text-destructive">{error}</p> : null}
         </div>
         <div className="mt-6 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
-          <ActionButton tone="ghost" onClick={onCancel}>
+          <ActionButton tone="ghost" onClick={onCancel} disabled={confirming}>
             Cancel
           </ActionButton>
-          <ActionButton tone="accent" onClick={confirm} disabled={!pin}>
-            {confirmLabel}
+          <ActionButton tone="accent" onClick={() => void confirm()} disabled={!pin || confirming}>
+            {confirming ? "Deleting…" : confirmLabel}
           </ActionButton>
         </div>
       </div>

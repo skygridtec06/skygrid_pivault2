@@ -10,6 +10,6 @@ export default defineConfig({
   tanstackStart: {
     // Use the root server folder as the SSR/backend entry.
     // nitro/vite builds from this
-    server: { entry: "server/index" },
+    server: { entry: "../server/index" },
   },
 });
