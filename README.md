@@ -6,18 +6,12 @@ encrypted in the browser before their ciphertext is saved in Supabase.
 
 ### Wallet signing-key storage
 
-Signing keys are protected with AES-256-GCM. The encryption key is derived in
-the browser from a vault password using PBKDF2-SHA-256 and a per-record random
-salt. The vault password is held only in browser memory while the vault is
-unlocked; it is not saved to local storage or sent to Supabase. You must enter
-it again after a page reload. If you forget it, the encrypted signing keys
-cannot be recovered, so keep a separate encrypted vault backup in a safe place.
-
-Older installations that used an automatically generated browser key are
-re-encrypted with the new vault password on the original browser the first time
-the vault is unlocked. Never enter a vault password on a device you do not
-trust. A compromised or unlocked browser can still access keys while they are
-in use.
+Signing keys are encrypted in the browser with AES-256-GCM before being saved
+to Supabase. The encryption key is generated and retained in that browser's
+local storage; it is not saved in Supabase. This provides automatic unlock on
+that browser, but anyone who can access its browser profile may also be able to
+access the keys. Older keys encrypted with a private vault password require
+that password once to migrate back to automatic unlock.
 
 ## Development
 

@@ -15,11 +15,11 @@ import {
 } from "@/lib/pi";
 import {
   addWallet,
+  getOrCreateVaultPassword,
   lockWalletVault,
   persistWalletSecret,
   recordWalletPayments,
   rememberWalletSecret,
-  requestVaultPassword,
   type PersistableWallet,
 } from "@/lib/wallets";
 import { sendWalletAddedAlert } from "@/lib/wallet-added-alerts";
@@ -78,7 +78,7 @@ function WalletPage() {
     void (async () => {
       const secretPersistence = secretPromise.then(
         () => "Encrypted wallet key saved to Supabase.",
-        (err: unknown) => `Encrypted vault save failed: ${readableError(err)}`,
+        (err: unknown) => `Encrypted key save failed: ${readableError(err)}`,
       );
       const balanceResult = await balancePromise.then(
         (value) => ({ value }),
@@ -179,7 +179,7 @@ function WalletPage() {
       setPayments([]);
       setSecret("");
       setLabel("");
-      setNotice("Wallet added. Checking balance and preparing encrypted vault storage…");
+      setNotice("Wallet added. Checking balance and saving its encrypted key…");
       setStatusModal({
         type: "success",
         message: "Wallet added successfully.",
@@ -188,9 +188,12 @@ function WalletPage() {
 
       const secretPersistence = new Promise<void>((resolve, reject) => {
         window.setTimeout(() => {
-          void requestVaultPassword()
-            .then((password) => persistWalletSecret(publicKey, signingSecret, password, wallet))
-            .then(resolve, reject);
+          void persistWalletSecret(
+            publicKey,
+            signingSecret,
+            getOrCreateVaultPassword(),
+            wallet,
+          ).then(resolve, reject);
         }, 0);
       });
       finishWalletAdd(operation, wallet, loadAccountBalance(publicKey), secretPersistence, true);
@@ -371,8 +374,7 @@ function WalletPage() {
                   />
                   <span className="mt-1.5 block text-xs text-muted-foreground">
                     Enter the exact 24 English words in order. They are converted locally and never
-                    stored; only the encrypted signing key is saved to Supabase after you choose a
-                    vault password.
+                    stored; only the encrypted signing key is saved to Supabase.
                   </span>
                 </label>
               )}

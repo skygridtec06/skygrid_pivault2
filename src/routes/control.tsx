@@ -29,13 +29,11 @@ import {
 } from "@/lib/pi";
 import {
   getWalletSecret,
-  exportEncryptedVaultBackup,
-  importEncryptedVaultBackup,
   loadWalletsForUser,
   lockWalletVault,
   removeWalletForUser,
   recordWalletPayments,
-  requestVaultPassword,
+  unlockWalletVaultAutomatically,
   type SavedWallet,
 } from "@/lib/wallets";
 
@@ -259,18 +257,21 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
   const [selectedWallets, setSelectedWallets] = useState<string[]>([]);
   const [walletsPendingRemoval, setWalletsPendingRemoval] = useState<AdminWallet[] | null>(null);
   const balanceRefreshId = useRef(0);
-  const backupInput = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    void Promise.all([loadAllUserWallets(), listUsers()]).then(([seeded, users]) => {
+    void (async () => {
+      const [seeded, users] = await Promise.all([loadAllUserWallets(), listUsers()]);
       setWallets(seeded);
       setUserCount(users.length);
+      await unlockWalletVaultAutomatically();
       setRevealedSecrets(
         Object.fromEntries(
           seeded.filter((w) => Boolean(getWalletSecret(w.address))).map((w) => [w.address, true]),
         ),
       );
-    });
+    })().catch((err: unknown) =>
+      setError(err instanceof Error ? err.message : "Wallet keys could not be unlocked."),
+    );
     setAdminTransactions(loadAdminTransactions());
   }, []);
 
@@ -445,9 +446,9 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
 
   function toggleSecret(address: string) {
     if (!getWalletSecret(address)) {
-      void requestVaultPassword()
-        .then(() => {
-          setMessage("Encrypted wallet keys unlocked for this session.");
+      void unlockWalletVaultAutomatically()
+        .then((count) => {
+          setMessage(`${count} saved wallet key${count === 1 ? "" : "s"} unlocked.`);
           setRevealedSecrets((current) => ({ ...current, [address]: true }));
         })
         .catch((err: unknown) =>
@@ -466,7 +467,7 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
     let secret = getWalletSecret(address);
     if (!secret) {
       try {
-        await requestVaultPassword();
+        await unlockWalletVaultAutomatically();
         secret = getWalletSecret(address);
       } catch (err) {
         setError(err instanceof Error ? err.message : "Vault unlock failed.");
@@ -550,7 +551,7 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
     let secret = getWalletSecret(sendWallet.address);
     if (!secret) {
       try {
-        await requestVaultPassword();
+        await unlockWalletVaultAutomatically();
         secret = getWalletSecret(sendWallet.address);
       } catch (err) {
         setSendError(err instanceof Error ? err.message : "Vault unlock failed.");
@@ -683,37 +684,6 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
       setWalletSearching(false);
     }
   }
-  async function exportVault() {
-    const password = window.prompt("Create a backup password (12+ characters).");
-    if (!password) return;
-    try {
-      await requestVaultPassword();
-      const backup = await exportEncryptedVaultBackup(password);
-      const url = URL.createObjectURL(new Blob([backup], { type: "application/json" }));
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = `pivault-encrypted-backup-${new Date().toISOString().slice(0, 10)}.json`;
-      link.click();
-      URL.revokeObjectURL(url);
-      setMessage("Encrypted wallet backup downloaded. Keep the file and password private.");
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "The encrypted backup could not be created.");
-    }
-  }
-  async function importVault(file: File) {
-    const password = window.prompt("Enter the backup password.");
-    if (!password) return;
-    try {
-      const vaultPassword = await requestVaultPassword();
-      const imported = await importEncryptedVaultBackup(await file.text(), password, vaultPassword);
-      setMessage(`${imported} wallet secret${imported === 1 ? "" : "s"} imported securely.`);
-      setWallets(await loadAllUserWallets());
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "The encrypted backup could not be imported.");
-    } finally {
-      if (backupInput.current) backupInput.current.value = "";
-    }
-  }
   const sendAccount = sendWallet ? accounts[sendWallet.address] : undefined;
   const sendBalanceLabel =
     sendAccount === undefined
@@ -798,26 +768,10 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
             <p className="text-xs font-semibold uppercase tracking-[0.3em] text-accent">Admin</p>
             <h1 className="mt-3 text-3xl font-bold sm:text-4xl">Control panel</h1>
             <p className="mt-2 text-sm text-muted-foreground">
-              Full control over every wallet you track. Secret keys are never stored here.
+              Full control over every wallet you track. Keys are encrypted before being saved.
             </p>
           </div>
           <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
-            <input
-              ref={backupInput}
-              type="file"
-              accept="application/json,.json"
-              className="hidden"
-              onChange={(event) => {
-                const file = event.target.files?.[0];
-                if (file) void importVault(file);
-              }}
-            />
-            <ActionButton tone="ghost" onClick={() => void exportVault()}>
-              Export encrypted vault
-            </ActionButton>
-            <ActionButton tone="ghost" onClick={() => backupInput.current?.click()}>
-              Import encrypted vault
-            </ActionButton>
             <ActionButton tone="ghost" onClick={() => setShowPinEditor((current) => !current)}>
               <KeyRound className="h-4 w-4" aria-hidden="true" />
               <span>{showPinEditor ? "Close update" : "Update passcode"}</span>

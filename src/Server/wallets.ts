@@ -8,7 +8,6 @@ export type PersistableWallet = SavedWallet & { id: string; userId: string };
 const sessionSecrets = new Map<string, string>();
 let vaultPassword: string | undefined;
 const AUTO_VAULT_PASSWORD_KEY = "pivault-auto-vault-key";
-const VAULT_BACKUP_VERSION = 1;
 
 type EncryptedWalletSecret = {
   wallet_id: string;
@@ -50,101 +49,6 @@ async function deriveVaultKey(password: string, salt: Uint8Array): Promise<Crypt
     false,
     ["encrypt", "decrypt"],
   );
-}
-
-function validateVaultPassword(password: string): string {
-  const normalized = password.trim();
-  if (normalized.length < 12) throw new Error("Use a vault password with at least 12 characters.");
-  return normalized;
-}
-
-function promptForVaultPassword(
-  title: string,
-  description: string,
-  autocomplete: "current-password" | "new-password" = "current-password",
-): Promise<string | null> {
-  return new Promise((resolve) => {
-    const dialog = document.createElement("dialog");
-    dialog.className =
-      "w-[calc(100%-2rem)] max-w-md rounded-2xl border border-border bg-background p-0 text-foreground shadow-2xl backdrop:bg-black/60";
-    const form = document.createElement("form");
-    form.className = "space-y-5 p-6";
-    const heading = document.createElement("h2");
-    heading.className = "text-xl font-bold";
-    heading.textContent = title;
-    const help = document.createElement("p");
-    help.className = "text-sm text-muted-foreground";
-    help.textContent = description;
-    const label = document.createElement("label");
-    label.className = "block text-xs font-semibold uppercase tracking-[0.16em]";
-    label.textContent = "Vault password";
-    const input = document.createElement("input");
-    input.type = "password";
-    input.autocomplete = autocomplete;
-    input.minLength = 12;
-    input.required = true;
-    input.className =
-      "mt-2 w-full rounded-xl border border-border bg-input/40 px-4 py-3 text-sm outline-none focus:border-accent focus:ring-2 focus:ring-accent/40";
-    input.placeholder = "At least 12 characters";
-    const error = document.createElement("p");
-    error.className = "hidden text-sm text-destructive";
-    const actions = document.createElement("div");
-    actions.className = "flex justify-end gap-3";
-    const cancel = document.createElement("button");
-    cancel.type = "button";
-    cancel.className = "rounded-xl border border-border px-4 py-2.5 text-sm font-semibold";
-    cancel.textContent = "Cancel";
-    const submit = document.createElement("button");
-    submit.type = "submit";
-    submit.className =
-      "rounded-xl bg-accent px-4 py-2.5 text-sm font-semibold text-accent-foreground";
-    submit.textContent = "Continue";
-    actions.append(cancel, submit);
-    label.append(input);
-    form.append(heading, help, label, error, actions);
-    dialog.append(form);
-
-    cancel.addEventListener("click", () => dialog.close());
-    form.addEventListener("submit", (event) => {
-      event.preventDefault();
-      try {
-        validateVaultPassword(input.value);
-        dialog.close(input.value);
-      } catch (reason) {
-        error.textContent = reason instanceof Error ? reason.message : "Invalid vault password.";
-        error.classList.remove("hidden");
-      }
-    });
-    dialog.addEventListener(
-      "close",
-      () => {
-        const password = dialog.returnValue || null;
-        dialog.remove();
-        resolve(password);
-      },
-      { once: true },
-    );
-    document.body.append(dialog);
-    dialog.showModal();
-    input.focus();
-  });
-}
-
-async function promptForNewVaultPassword(): Promise<string> {
-  const password = await promptForVaultPassword(
-    "Create your vault password",
-    "This password encrypts wallet keys before they are saved to Supabase. It is never stored. If you forget it, the encrypted keys cannot be recovered.",
-    "new-password",
-  );
-  if (!password) throw new Error("Vault password setup was cancelled.");
-  const confirmation = await promptForVaultPassword(
-    "Confirm your vault password",
-    "Enter the same vault password again to confirm it.",
-    "new-password",
-  );
-  if (!confirmation) throw new Error("Vault password setup was cancelled.");
-  if (password !== confirmation) throw new Error("The vault passwords do not match.");
-  return validateVaultPassword(password);
 }
 
 async function loadEncryptedWalletSecrets(): Promise<EncryptedWalletSecret[]> {
@@ -191,19 +95,19 @@ async function encryptWalletSecret(
 async function migrateAutomaticVault(
   rows: EncryptedWalletSecret[],
   automaticPassword: string,
-  password: string,
+  previousPassword: string,
 ): Promise<void> {
   const restored = new Map<string, string>();
-  const encryptedRows = [];
+  const encryptedRows: Awaited<ReturnType<typeof encryptWalletSecret>>[] = [];
   for (const row of rows) {
     let secret: string;
     try {
-      secret = await decryptWalletSecret(row, password);
-    } catch {
       secret = await decryptWalletSecret(row, automaticPassword);
+    } catch {
+      secret = await decryptWalletSecret(row, previousPassword);
     }
     if (row.wallets?.address) restored.set(row.wallets.address, secret);
-    encryptedRows.push(await encryptWalletSecret(row, secret, password));
+    encryptedRows.push(await encryptWalletSecret(row, secret, automaticPassword));
   }
 
   if (encryptedRows.length > 0) {
@@ -214,8 +118,7 @@ async function migrateAutomaticVault(
   }
   sessionSecrets.clear();
   for (const [address, secret] of restored) sessionSecrets.set(address, secret);
-  vaultPassword = password;
-  window.localStorage.removeItem(AUTO_VAULT_PASSWORD_KEY);
+  vaultPassword = automaticPassword;
 }
 
 export function rememberWalletSecret(address: string, secret: string) {
@@ -241,7 +144,6 @@ export async function persistWalletSecret(
   password: string,
   walletReference?: Pick<PersistableWallet, "id" | "userId">,
 ) {
-  password = validateVaultPassword(password);
   let wallet = walletReference;
   if (!wallet) {
     const { data, error } = await getSupabase()
@@ -267,119 +169,49 @@ export async function persistWalletSecret(
   sessionSecrets.set(address, secret.trim());
 }
 
-export async function exportEncryptedVaultBackup(password: string): Promise<string> {
-  password = validateVaultPassword(password);
-  const wallets = [...sessionSecrets.entries()].map(([address, secret]) => ({ address, secret }));
-  if (wallets.length === 0)
-    throw new Error("Unlock at least one wallet before exporting a backup.");
-  const salt = crypto.getRandomValues(new Uint8Array(16));
-  const iv = crypto.getRandomValues(new Uint8Array(12));
-  const key = await deriveVaultKey(password, salt);
-  const encrypted = await crypto.subtle.encrypt(
-    { name: "AES-GCM", iv: toArrayBuffer(iv) },
-    key,
-    new TextEncoder().encode(
-      JSON.stringify({
-        version: VAULT_BACKUP_VERSION,
-        createdAt: new Date().toISOString(),
-        wallets,
-      }),
-    ),
-  );
-  return JSON.stringify({
-    version: VAULT_BACKUP_VERSION,
-    ciphertext: bytesToBase64(new Uint8Array(encrypted)),
-    salt: bytesToBase64(salt),
-    iv: bytesToBase64(iv),
-  });
-}
-
-export async function importEncryptedVaultBackup(
-  backupText: string,
-  password: string,
-  vaultEncryptionPassword: string,
-): Promise<number> {
-  password = validateVaultPassword(password);
-  vaultEncryptionPassword = validateVaultPassword(vaultEncryptionPassword);
-  let backup: { version?: number; ciphertext?: string; salt?: string; iv?: string };
-  try {
-    backup = JSON.parse(backupText) as typeof backup;
-  } catch {
-    throw new Error("This is not a valid Pi Vault backup file.");
-  }
-  if (backup.version !== VAULT_BACKUP_VERSION || !backup.ciphertext || !backup.salt || !backup.iv) {
-    throw new Error("This backup file is not supported.");
-  }
-  let payload: { version?: number; wallets?: Array<{ address?: string; secret?: string }> };
-  try {
-    const key = await deriveVaultKey(password, base64ToBytes(backup.salt));
-    const decrypted = await crypto.subtle.decrypt(
-      { name: "AES-GCM", iv: toArrayBuffer(base64ToBytes(backup.iv)) },
-      key,
-      toArrayBuffer(base64ToBytes(backup.ciphertext)),
-    );
-    payload = JSON.parse(new TextDecoder().decode(decrypted)) as typeof payload;
-  } catch {
-    throw new Error("The backup password is incorrect or the backup is corrupted.");
-  }
-  if (payload.version !== VAULT_BACKUP_VERSION || !Array.isArray(payload.wallets)) {
-    throw new Error("This backup payload is not supported.");
-  }
-  let imported = 0;
-  for (const wallet of payload.wallets) {
-    if (!wallet.address || !wallet.secret) continue;
-    await persistWalletSecret(wallet.address, wallet.secret, vaultEncryptionPassword);
-    imported += 1;
-  }
-  return imported;
-}
-
-export async function unlockWalletVault(password: string): Promise<number> {
-  password = validateVaultPassword(password);
-  const rows = await loadEncryptedWalletSecrets();
-  const restoredSecrets = new Map<string, string>();
-  for (const row of rows) {
-    try {
-      const secret = await decryptWalletSecret(row, password);
-      if (row.wallets?.address) restoredSecrets.set(row.wallets.address, secret);
-    } catch {
-      sessionSecrets.clear();
-      vaultPassword = undefined;
-      throw new Error("Vault password is incorrect or a stored wallet secret is corrupted.");
-    }
-  }
-  sessionSecrets.clear();
-  for (const [address, secret] of restoredSecrets) sessionSecrets.set(address, secret);
-  vaultPassword = password;
-  return restoredSecrets.size;
-}
-
-export async function requestVaultPassword(): Promise<string> {
+export function getOrCreateVaultPassword(): string {
   if (vaultPassword) return vaultPassword;
-  const rows = await loadEncryptedWalletSecrets();
-  const automaticPassword = window.localStorage.getItem(AUTO_VAULT_PASSWORD_KEY);
-  if (rows.length > 0 && automaticPassword) {
-    const password = await promptForNewVaultPassword();
-    await migrateAutomaticVault(rows, automaticPassword, password);
-    return password;
+  const existing = window.localStorage.getItem(AUTO_VAULT_PASSWORD_KEY);
+  if (existing && existing.length >= 12) {
+    vaultPassword = existing;
+    return existing;
   }
-  if (rows.length > 0) {
-    const password = await promptForVaultPassword(
-      "Unlock your vault",
-      "Enter the password you chose to encrypt your wallet keys.",
-    );
-    if (!password) throw new Error("Vault unlock was cancelled.");
-    await unlockWalletVault(password);
-    return password;
-  }
-  const password = await promptForNewVaultPassword();
-  window.localStorage.removeItem(AUTO_VAULT_PASSWORD_KEY);
-  vaultPassword = password;
-  return password;
+  const generated = bytesToBase64(crypto.getRandomValues(new Uint8Array(32)));
+  window.localStorage.setItem(AUTO_VAULT_PASSWORD_KEY, generated);
+  vaultPassword = generated;
+  return generated;
 }
 
-export function getVaultPassword(): string | undefined {
-  return vaultPassword;
+export async function unlockWalletVaultAutomatically(): Promise<number> {
+  if (vaultPassword) return sessionSecrets.size;
+  const rows = await loadEncryptedWalletSecrets();
+  const automaticPassword = getOrCreateVaultPassword();
+  const restored = new Map<string, string>();
+
+  try {
+    for (const row of rows) {
+      const secret = await decryptWalletSecret(row, automaticPassword);
+      if (row.wallets?.address) restored.set(row.wallets.address, secret);
+    }
+    sessionSecrets.clear();
+    for (const [address, secret] of restored) sessionSecrets.set(address, secret);
+    return restored.size;
+  } catch {
+    if (rows.length === 0) throw new Error("No encrypted wallet keys were found.");
+  }
+
+  const previousPassword = window.prompt(
+    "Enter your previous vault password once to restore automatic unlock on this browser.",
+  );
+  if (!previousPassword) throw new Error("One-time wallet key migration was cancelled.");
+  try {
+    await migrateAutomaticVault(rows, automaticPassword, previousPassword);
+    return sessionSecrets.size;
+  } catch {
+    throw new Error(
+      "The previous vault password is incorrect or a stored wallet key is corrupted.",
+    );
+  }
 }
 
 export async function loadWallets(): Promise<SavedWallet[]> {
