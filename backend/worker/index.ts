@@ -21,6 +21,8 @@ const HORIZON_URL = "https://api.mainnet.minepi.com";
 const SUPABASE_URL = required("SUPABASE_URL");
 const SERVICE_KEY = required("SUPABASE_SERVICE_ROLE_KEY");
 const streams = new Map<string, AbortController>();
+const reconnectAttempts = new Map<string, number>();
+let nextStreamStartAt = 0;
 
 function required(name: string): string {
   const value = process.env[name];
@@ -131,6 +133,11 @@ async function streamWallet(wallet: Wallet): Promise<void> {
   const controller = new AbortController();
   streams.set(wallet.address, controller);
   try {
+    const startAt = Math.max(Date.now(), nextStreamStartAt);
+    nextStreamStartAt = startAt + 250;
+    await new Promise<void>((resolve) => setTimeout(resolve, startAt - Date.now()));
+    if (controller.signal.aborted) return;
+
     const cursor = await loadCursor(wallet.id);
     const response = await fetch(
       `${HORIZON_URL}/accounts/${encodeURIComponent(wallet.address)}/payments?cursor=${encodeURIComponent(cursor)}`,
@@ -142,6 +149,7 @@ async function streamWallet(wallet: Wallet): Promise<void> {
     if (!response.ok || !response.body) {
       throw new Error(`Pi stream failed with HTTP ${response.status}.`);
     }
+    reconnectAttempts.delete(wallet.address);
     console.log(`Pi payment stream connected for ${wallet.address.slice(0, 8)}.`);
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
@@ -183,7 +191,11 @@ async function streamWallet(wallet: Wallet): Promise<void> {
   } finally {
     streams.delete(wallet.address);
     if (!controller.signal.aborted) {
-      setTimeout(() => void streamWallet(wallet), 1000);
+      const attempts = reconnectAttempts.get(wallet.address) ?? 0;
+      const backoff = Math.min(1000 * 2 ** attempts, 60_000);
+      reconnectAttempts.set(wallet.address, Math.min(attempts + 1, 6));
+      const delay = Math.round(backoff * (0.75 + Math.random() * 0.5));
+      setTimeout(() => void streamWallet(wallet), delay);
     }
   }
 }
@@ -195,7 +207,10 @@ async function reconcileStreams() {
     if (!streams.has(wallet.address)) void streamWallet(wallet);
   }
   for (const [address, controller] of streams) {
-    if (!active.has(address)) controller.abort();
+    if (!active.has(address)) {
+      reconnectAttempts.delete(address);
+      controller.abort();
+    }
   }
 }
 
