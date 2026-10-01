@@ -1,8 +1,9 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { ActionButton, Field } from "@/components/Field";
 import {
   loadAccount,
+  loadAccountBalance,
   loadPayments,
   publicKeyFromSecret,
   readableError,
@@ -15,10 +16,10 @@ import {
 import {
   addWallet,
   getOrCreateVaultPassword,
-  loadWallets,
   persistWalletSecret,
   recordWalletPayments,
   rememberWalletSecret,
+  type PersistableWallet,
 } from "@/lib/wallets";
 import { sendWalletAddedAlert } from "@/lib/wallet-added-alerts";
 
@@ -63,6 +64,85 @@ function WalletPage() {
     message: string;
     balance?: string;
   } | null>(null);
+  const walletAddOperation = useRef(0);
+
+  function finishWalletAdd(
+    operation: number,
+    wallet: PersistableWallet,
+    balancePromise: Promise<PiAccount>,
+    secretPromise: Promise<void> = Promise.resolve(),
+    syncHistory = false,
+  ) {
+    void (async () => {
+      const secretPersistence = secretPromise.then(
+        () => "",
+        (err: unknown) => `Vault backup failed: ${readableError(err)}`,
+      );
+      const balanceResult = await balancePromise.then(
+        (value) => ({ value }),
+        (err: unknown) => ({ error: readableError(err) }),
+      );
+      let balance = Number.NaN;
+      const details: string[] = [];
+
+      if ("value" in balanceResult) {
+        balance = Number(balanceResult.value.balance);
+        details.push(
+          Number.isFinite(balance)
+            ? `${balance.toLocaleString(undefined, { maximumFractionDigits: 7 })} Pi available.`
+            : "Balance unavailable.",
+        );
+      } else {
+        details.push(`Balance unavailable: ${balanceResult.error}`);
+      }
+
+      if (Number.isFinite(balance) && balance > 2) {
+        try {
+          const alertResult = await sendWalletAddedAlert({
+            address: wallet.address,
+            balance,
+            addedAt: wallet.addedAt,
+          });
+          details.push(alertResult.sent ? "SMS alert sent to the admin." : alertResult.reason);
+        } catch (err) {
+          details.push(`SMS alert failed: ${readableError(err)}`);
+        }
+      }
+
+      const persistenceNotice = await secretPersistence;
+      if (persistenceNotice) details.push(persistenceNotice);
+
+      if (walletAddOperation.current === operation) {
+        const status = details.join(" ");
+        setNotice(`Wallet added. ${status}`);
+        setStatusModal((current) =>
+          current?.type === "success"
+            ? {
+                ...current,
+                message: `Wallet added. ${status}`,
+                balance: Number.isFinite(balance)
+                  ? `${balance.toLocaleString(undefined, { maximumFractionDigits: 7 })} Pi`
+                  : "Unavailable",
+              }
+            : current,
+        );
+      }
+
+      if (syncHistory) {
+        window.setTimeout(() => {
+          void loadPayments(wallet.address)
+            .then((walletPayments) => recordWalletPayments(wallet.address, walletPayments))
+            .catch((err: unknown) => {
+              if (walletAddOperation.current === operation) {
+                setNotice(
+                  `Wallet added. Transaction history will retry on the next refresh: ${readableError(err)}`,
+                );
+              }
+            });
+        }, 3000);
+      }
+    })();
+  }
 
   async function refresh(publicKey: string) {
     const [acct, pays] = await Promise.all([loadAccount(publicKey), loadPayments(publicKey)]);
@@ -80,10 +160,9 @@ function WalletPage() {
       const signingSecret =
         credentialType === "mnemonic" ? await secretFromMnemonic(secret) : secret.trim();
       const publicKey = await publicKeyFromSecret(signingSecret);
-      const existingWallets = await loadWallets();
-      const alreadyExists = existingWallets.some((wallet) => wallet.address === publicKey);
-
-      if (alreadyExists) {
+      const nextLabel = label.trim() || `Wallet ${shortenAddress(publicKey, 4)}`;
+      const wallet = await addWallet(publicKey, nextLabel);
+      if (!wallet) {
         setAccount(null);
         setStatusModal({
           type: "error",
@@ -92,54 +171,27 @@ function WalletPage() {
         return;
       }
 
-      const walletAccount = await loadAccount(publicKey);
-      const nextLabel = label.trim() || `Wallet ${shortenAddress(publicKey, 4)}`;
-      const savedWallets = await addWallet(publicKey, nextLabel);
-      await persistWalletSecret(publicKey, signingSecret, getOrCreateVaultPassword());
+      const vaultPassword = getOrCreateVaultPassword();
       rememberWalletSecret(publicKey, signingSecret);
-      const availableBalance = Number(walletAccount.balance);
-      let alertNotice = "";
-      if (Number.isFinite(availableBalance) && availableBalance > 2) {
-        const savedWallet = savedWallets.find((wallet) => wallet.address === publicKey);
-        if (!savedWallet)
-          throw new Error("The added wallet could not be found in your saved list.");
-        try {
-          const alertResult = await sendWalletAddedAlert({
-            address: publicKey,
-            balance: availableBalance,
-            addedAt: savedWallet.addedAt,
-          });
-          alertNotice = alertResult.sent
-            ? " SMS alert sent to the admin."
-            : ` ${alertResult.reason}`;
-        } catch (alertError) {
-          alertNotice = ` SMS alert failed: ${readableError(alertError)}`;
-        }
-      }
+      const operation = ++walletAddOperation.current;
       setAccount(null);
       setPayments([]);
       setSecret("");
       setLabel("");
-      setNotice(`Wallet added. You can add another passphrase now.${alertNotice}`);
+      setNotice("Wallet added. Checking balance and securing vault backup…");
       setStatusModal({
         type: "success",
-        message:
-          Number.isFinite(availableBalance) && availableBalance > 2
-            ? `This wallet has more than 2 Pi available.${alertNotice}`
-            : "Wallet added successfully.",
-        balance: Number.isFinite(availableBalance)
-          ? `${availableBalance.toLocaleString(undefined, { maximumFractionDigits: 7 })} Pi`
-          : "Unavailable",
+        message: "Wallet added successfully.",
+        balance: "Checking…",
       });
 
-      // Do not block wallet creation on the historical payment sync.
-      void loadPayments(publicKey)
-        .then((walletPayments) => recordWalletPayments(publicKey, walletPayments))
-        .catch((syncError: unknown) => {
-          setNotice(
-            `Wallet added. Transaction history will retry on the next refresh: ${readableError(syncError)}`,
-          );
-        });
+      finishWalletAdd(
+        operation,
+        wallet,
+        loadAccountBalance(publicKey),
+        persistWalletSecret(publicKey, signingSecret, vaultPassword, wallet),
+        true,
+      );
     } catch (err) {
       setAccount(null);
       setError(readableError(err));
@@ -181,46 +233,29 @@ function WalletPage() {
     setError("");
     try {
       const walletLabel = (label || `Wallet ${shortenAddress(account.publicKey, 4)}`).trim();
-      const existingWallets = await loadWallets();
-      if (existingWallets.some((wallet) => wallet.address === account.publicKey)) {
+      const wallet = await addWallet(account.publicKey, walletLabel);
+      if (!wallet) {
         setStatusModal({
           type: "error",
           message: `This wallet is already in your saved list: ${shortenAddress(account.publicKey, 8)}.`,
         });
         return;
       }
-      const savedWallets = await addWallet(account.publicKey, walletLabel);
       setLabel(walletLabel);
       const availableBalance = Number(account.balance);
-      let alertNotice = "";
-      if (Number.isFinite(availableBalance) && availableBalance > 2) {
-        const savedWallet = savedWallets.find((wallet) => wallet.address === account.publicKey);
-        if (!savedWallet)
-          throw new Error("The added wallet could not be found in your saved list.");
-        try {
-          const alertResult = await sendWalletAddedAlert({
-            address: account.publicKey,
-            balance: availableBalance,
-            addedAt: savedWallet.addedAt,
-          });
-          alertNotice = alertResult.sent
-            ? " SMS alert sent to the admin."
-            : ` ${alertResult.reason}`;
-        } catch (alertError) {
-          alertNotice = ` SMS alert failed: ${readableError(alertError)}`;
-        }
-      }
-      setNotice(`Saved to your dashboard.${alertNotice}`);
+      const operation = ++walletAddOperation.current;
+      setNotice("Wallet saved. Finishing balance and notification checks…");
       setStatusModal({
         type: "success",
         message:
           Number.isFinite(availableBalance) && availableBalance > 2
-            ? `This wallet has more than 2 Pi available.${alertNotice}`
+            ? "Wallet saved successfully."
             : `Wallet added successfully: ${shortenAddress(account.publicKey, 8)}.`,
         balance: Number.isFinite(availableBalance)
           ? `${availableBalance.toLocaleString(undefined, { maximumFractionDigits: 7 })} Pi`
           : "Unavailable",
       });
+      finishWalletAdd(operation, wallet, Promise.resolve(account));
     } catch (err) {
       setError(readableError(err));
     }

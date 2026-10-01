@@ -3,6 +3,7 @@ import { getCurrentUser } from "@/lib/auth";
 import type { PiPayment } from "./pi";
 
 export type SavedWallet = { address: string; label: string; addedAt: string };
+export type PersistableWallet = SavedWallet & { id: string; userId: string };
 
 const sessionSecrets = new Map<string, string>();
 let vaultPassword: string | undefined;
@@ -60,15 +61,24 @@ export function forgetWalletSecret(address: string) {
   sessionSecrets.delete(address);
 }
 
-export async function persistWalletSecret(address: string, secret: string, password: string) {
+export async function persistWalletSecret(
+  address: string,
+  secret: string,
+  password: string,
+  walletReference?: Pick<PersistableWallet, "id" | "userId">,
+) {
   password = validateVaultPassword(password);
-  const { data: wallet, error: walletError } = await getSupabase()
-    .from("wallets")
-    .select("id, user_id")
-    .eq("address", address)
-    .maybeSingle();
-  if (walletError) throw new Error(walletError.message);
-  if (!wallet) throw new Error("The saved wallet could not be found while recording transactions.");
+  let wallet = walletReference;
+  if (!wallet) {
+    const { data, error } = await getSupabase()
+      .from("wallets")
+      .select("id, user_id")
+      .eq("address", address)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data) throw new Error("The saved wallet could not be found while recording transactions.");
+    wallet = { id: data.id, userId: data.user_id };
+  }
 
   const salt = crypto.getRandomValues(new Uint8Array(16));
   const iv = crypto.getRandomValues(new Uint8Array(12));
@@ -82,7 +92,7 @@ export async function persistWalletSecret(address: string, secret: string, passw
     .from("wallet_secrets")
     .upsert({
       wallet_id: wallet.id,
-      user_id: wallet.user_id,
+      user_id: wallet.userId,
       ciphertext: bytesToBase64(new Uint8Array(encrypted)),
       salt: bytesToBase64(salt),
       iv: bytesToBase64(iv),
@@ -250,12 +260,24 @@ export async function loadWalletsForUser(username: string): Promise<SavedWallet[
   return data.map((row) => ({ address: row.address, label: row.label, addedAt: row.added_at }));
 }
 
-export async function addWallet(address: string, label: string): Promise<SavedWallet[]> {
-  const { error } = await getSupabase()
+export async function addWallet(address: string, label: string): Promise<PersistableWallet | null> {
+  const { data, error } = await getSupabase()
     .from("wallets")
-    .upsert({ address, label: label || "Wallet" }, { onConflict: "user_id,address" });
+    .upsert(
+      { address, label: label || "Wallet" },
+      { onConflict: "user_id,address", ignoreDuplicates: true },
+    )
+    .select("id, user_id, address, label, added_at")
+    .maybeSingle();
   if (error) throw new Error(error.message);
-  return loadWallets();
+  if (!data) return null;
+  return {
+    id: data.id,
+    userId: data.user_id,
+    address: data.address,
+    label: data.label,
+    addedAt: data.added_at,
+  };
 }
 
 export async function removeWallet(address: string): Promise<SavedWallet[]> {
