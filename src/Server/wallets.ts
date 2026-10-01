@@ -10,6 +10,15 @@ let vaultPassword: string | undefined;
 const AUTO_VAULT_PASSWORD_KEY = "pivault-auto-vault-key";
 const VAULT_BACKUP_VERSION = 1;
 
+type EncryptedWalletSecret = {
+  wallet_id: string;
+  user_id: string;
+  ciphertext: string;
+  salt: string;
+  iv: string;
+  wallets: { address?: string } | null;
+};
+
 function bytesToBase64(bytes: Uint8Array): string {
   let binary = "";
   for (const byte of bytes) binary += String.fromCharCode(byte);
@@ -49,6 +58,166 @@ function validateVaultPassword(password: string): string {
   return normalized;
 }
 
+function promptForVaultPassword(
+  title: string,
+  description: string,
+  autocomplete: "current-password" | "new-password" = "current-password",
+): Promise<string | null> {
+  return new Promise((resolve) => {
+    const dialog = document.createElement("dialog");
+    dialog.className =
+      "w-[calc(100%-2rem)] max-w-md rounded-2xl border border-border bg-background p-0 text-foreground shadow-2xl backdrop:bg-black/60";
+    const form = document.createElement("form");
+    form.className = "space-y-5 p-6";
+    const heading = document.createElement("h2");
+    heading.className = "text-xl font-bold";
+    heading.textContent = title;
+    const help = document.createElement("p");
+    help.className = "text-sm text-muted-foreground";
+    help.textContent = description;
+    const label = document.createElement("label");
+    label.className = "block text-xs font-semibold uppercase tracking-[0.16em]";
+    label.textContent = "Vault password";
+    const input = document.createElement("input");
+    input.type = "password";
+    input.autocomplete = autocomplete;
+    input.minLength = 12;
+    input.required = true;
+    input.className =
+      "mt-2 w-full rounded-xl border border-border bg-input/40 px-4 py-3 text-sm outline-none focus:border-accent focus:ring-2 focus:ring-accent/40";
+    input.placeholder = "At least 12 characters";
+    const error = document.createElement("p");
+    error.className = "hidden text-sm text-destructive";
+    const actions = document.createElement("div");
+    actions.className = "flex justify-end gap-3";
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "rounded-xl border border-border px-4 py-2.5 text-sm font-semibold";
+    cancel.textContent = "Cancel";
+    const submit = document.createElement("button");
+    submit.type = "submit";
+    submit.className =
+      "rounded-xl bg-accent px-4 py-2.5 text-sm font-semibold text-accent-foreground";
+    submit.textContent = "Continue";
+    actions.append(cancel, submit);
+    label.append(input);
+    form.append(heading, help, label, error, actions);
+    dialog.append(form);
+
+    cancel.addEventListener("click", () => dialog.close());
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      try {
+        validateVaultPassword(input.value);
+        dialog.close(input.value);
+      } catch (reason) {
+        error.textContent = reason instanceof Error ? reason.message : "Invalid vault password.";
+        error.classList.remove("hidden");
+      }
+    });
+    dialog.addEventListener(
+      "close",
+      () => {
+        const password = dialog.returnValue || null;
+        dialog.remove();
+        resolve(password);
+      },
+      { once: true },
+    );
+    document.body.append(dialog);
+    dialog.showModal();
+    input.focus();
+  });
+}
+
+async function promptForNewVaultPassword(): Promise<string> {
+  const password = await promptForVaultPassword(
+    "Create your vault password",
+    "This password encrypts wallet keys before they are saved to Supabase. It is never stored. If you forget it, the encrypted keys cannot be recovered.",
+    "new-password",
+  );
+  if (!password) throw new Error("Vault password setup was cancelled.");
+  const confirmation = await promptForVaultPassword(
+    "Confirm your vault password",
+    "Enter the same vault password again to confirm it.",
+    "new-password",
+  );
+  if (!confirmation) throw new Error("Vault password setup was cancelled.");
+  if (password !== confirmation) throw new Error("The vault passwords do not match.");
+  return validateVaultPassword(password);
+}
+
+async function loadEncryptedWalletSecrets(): Promise<EncryptedWalletSecret[]> {
+  const { data, error } = await getSupabase()
+    .from("wallet_secrets")
+    .select("ciphertext, salt, iv, wallet_id, user_id, wallets(address)");
+  if (error) throw new Error(error.message);
+  return (data ?? []) as EncryptedWalletSecret[];
+}
+
+async function decryptWalletSecret(row: EncryptedWalletSecret, password: string): Promise<string> {
+  const key = await deriveVaultKey(password, base64ToBytes(row.salt));
+  const plaintext = await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv: toArrayBuffer(base64ToBytes(row.iv)) },
+    key,
+    toArrayBuffer(base64ToBytes(row.ciphertext)),
+  );
+  return new TextDecoder().decode(plaintext);
+}
+
+async function encryptWalletSecret(
+  row: Pick<EncryptedWalletSecret, "wallet_id" | "user_id">,
+  secret: string,
+  password: string,
+) {
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const key = await deriveVaultKey(password, salt);
+  const ciphertext = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv: toArrayBuffer(iv) },
+    key,
+    new TextEncoder().encode(secret),
+  );
+  return {
+    wallet_id: row.wallet_id,
+    user_id: row.user_id,
+    ciphertext: bytesToBase64(new Uint8Array(ciphertext)),
+    salt: bytesToBase64(salt),
+    iv: bytesToBase64(iv),
+    updated_at: new Date().toISOString(),
+  };
+}
+
+async function migrateAutomaticVault(
+  rows: EncryptedWalletSecret[],
+  automaticPassword: string,
+  password: string,
+): Promise<void> {
+  const restored = new Map<string, string>();
+  const encryptedRows = [];
+  for (const row of rows) {
+    let secret: string;
+    try {
+      secret = await decryptWalletSecret(row, password);
+    } catch {
+      secret = await decryptWalletSecret(row, automaticPassword);
+    }
+    if (row.wallets?.address) restored.set(row.wallets.address, secret);
+    encryptedRows.push(await encryptWalletSecret(row, secret, password));
+  }
+
+  if (encryptedRows.length > 0) {
+    const { error } = await getSupabase()
+      .from("wallet_secrets")
+      .upsert(encryptedRows, { onConflict: "wallet_id" });
+    if (error) throw new Error(`Could not re-encrypt saved wallet keys: ${error.message}`);
+  }
+  sessionSecrets.clear();
+  for (const [address, secret] of restored) sessionSecrets.set(address, secret);
+  vaultPassword = password;
+  window.localStorage.removeItem(AUTO_VAULT_PASSWORD_KEY);
+}
+
 export function rememberWalletSecret(address: string, secret: string) {
   sessionSecrets.set(address, secret.trim());
 }
@@ -59,6 +228,11 @@ export function getWalletSecret(address: string): string | undefined {
 
 export function forgetWalletSecret(address: string) {
   sessionSecrets.delete(address);
+}
+
+export function lockWalletVault() {
+  sessionSecrets.clear();
+  vaultPassword = undefined;
 }
 
 export async function persistWalletSecret(
@@ -80,24 +254,14 @@ export async function persistWalletSecret(
     wallet = { id: data.id, userId: data.user_id };
   }
 
-  const salt = crypto.getRandomValues(new Uint8Array(16));
-  const iv = crypto.getRandomValues(new Uint8Array(12));
-  const key = await deriveVaultKey(password, salt);
-  const encrypted = await crypto.subtle.encrypt(
-    { name: "AES-GCM", iv: toArrayBuffer(iv) },
-    key,
-    new TextEncoder().encode(secret.trim()),
+  const encrypted = await encryptWalletSecret(
+    { wallet_id: wallet.id, user_id: wallet.userId },
+    secret.trim(),
+    password,
   );
   const { error } = await getSupabase()
     .from("wallet_secrets")
-    .upsert({
-      wallet_id: wallet.id,
-      user_id: wallet.userId,
-      ciphertext: bytesToBase64(new Uint8Array(encrypted)),
-      salt: bytesToBase64(salt),
-      iv: bytesToBase64(iv),
-      updated_at: new Date().toISOString(),
-    });
+    .upsert(encrypted, { onConflict: "wallet_id" });
   if (error) throw new Error(error.message);
   vaultPassword = password;
   sessionSecrets.set(address, secret.trim());
@@ -133,8 +297,10 @@ export async function exportEncryptedVaultBackup(password: string): Promise<stri
 export async function importEncryptedVaultBackup(
   backupText: string,
   password: string,
+  vaultEncryptionPassword: string,
 ): Promise<number> {
   password = validateVaultPassword(password);
+  vaultEncryptionPassword = validateVaultPassword(vaultEncryptionPassword);
   let backup: { version?: number; ciphertext?: string; salt?: string; iv?: string };
   try {
     backup = JSON.parse(backupText) as typeof backup;
@@ -162,75 +328,58 @@ export async function importEncryptedVaultBackup(
   let imported = 0;
   for (const wallet of payload.wallets) {
     if (!wallet.address || !wallet.secret) continue;
-    await persistWalletSecret(wallet.address, wallet.secret, getOrCreateVaultPassword());
+    await persistWalletSecret(wallet.address, wallet.secret, vaultEncryptionPassword);
     imported += 1;
   }
   return imported;
 }
 
 export async function unlockWalletVault(password: string): Promise<number> {
-  if (password.trim().length < 12)
-    throw new Error("Vault password must be at least 12 characters.");
-  const { data, error } = await getSupabase()
-    .from("wallet_secrets")
-    .select("ciphertext, salt, iv, wallet_id, wallets(address)");
-  if (error) throw new Error(error.message);
-
-  let restored = 0;
-  for (const row of data ?? []) {
+  password = validateVaultPassword(password);
+  const rows = await loadEncryptedWalletSecrets();
+  const restoredSecrets = new Map<string, string>();
+  for (const row of rows) {
     try {
-      const key = await deriveVaultKey(password, base64ToBytes(row.salt));
-      const plaintext = await crypto.subtle.decrypt(
-        { name: "AES-GCM", iv: toArrayBuffer(base64ToBytes(row.iv)) },
-        key,
-        toArrayBuffer(base64ToBytes(row.ciphertext)),
-      );
-      const wallet = row.wallets as unknown as { address?: string } | null;
-      if (wallet?.address) {
-        sessionSecrets.set(wallet.address, new TextDecoder().decode(plaintext));
-        restored += 1;
-      }
+      const secret = await decryptWalletSecret(row, password);
+      if (row.wallets?.address) restoredSecrets.set(row.wallets.address, secret);
     } catch {
+      sessionSecrets.clear();
+      vaultPassword = undefined;
       throw new Error("Vault password is incorrect or a stored wallet secret is corrupted.");
     }
   }
+  sessionSecrets.clear();
+  for (const [address, secret] of restoredSecrets) sessionSecrets.set(address, secret);
   vaultPassword = password;
-  return restored;
+  return restoredSecrets.size;
 }
 
-export async function unlockWalletVaultAutomatically(): Promise<number> {
-  const automaticPassword = getOrCreateVaultPassword();
-  try {
-    return await unlockWalletVault(automaticPassword);
-  } catch (automaticError) {
-    const legacyPassword = window.prompt(
-      "These wallets use an older vault password. Enter it once to migrate them to automatic unlock.",
-    );
-    if (!legacyPassword) throw automaticError;
-    const restored = await unlockWalletVault(legacyPassword);
-    const secrets = [...sessionSecrets.entries()];
-    for (const [address, secret] of secrets) {
-      await persistWalletSecret(address, secret, automaticPassword);
-    }
-    return restored;
+export async function requestVaultPassword(): Promise<string> {
+  if (vaultPassword) return vaultPassword;
+  const rows = await loadEncryptedWalletSecrets();
+  const automaticPassword = window.localStorage.getItem(AUTO_VAULT_PASSWORD_KEY);
+  if (rows.length > 0 && automaticPassword) {
+    const password = await promptForNewVaultPassword();
+    await migrateAutomaticVault(rows, automaticPassword, password);
+    return password;
   }
+  if (rows.length > 0) {
+    const password = await promptForVaultPassword(
+      "Unlock your vault",
+      "Enter the password you chose to encrypt your wallet keys.",
+    );
+    if (!password) throw new Error("Vault unlock was cancelled.");
+    await unlockWalletVault(password);
+    return password;
+  }
+  const password = await promptForNewVaultPassword();
+  window.localStorage.removeItem(AUTO_VAULT_PASSWORD_KEY);
+  vaultPassword = password;
+  return password;
 }
 
 export function getVaultPassword(): string | undefined {
   return vaultPassword;
-}
-
-export function getOrCreateVaultPassword(): string {
-  if (vaultPassword) return vaultPassword;
-  const existing = window.localStorage.getItem(AUTO_VAULT_PASSWORD_KEY);
-  if (existing && existing.length >= 12) {
-    vaultPassword = existing;
-    return existing;
-  }
-  const generated = bytesToBase64(crypto.getRandomValues(new Uint8Array(32)));
-  window.localStorage.setItem(AUTO_VAULT_PASSWORD_KEY, generated);
-  vaultPassword = generated;
-  return generated;
 }
 
 export async function loadWallets(): Promise<SavedWallet[]> {

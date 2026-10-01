@@ -32,9 +32,10 @@ import {
   exportEncryptedVaultBackup,
   importEncryptedVaultBackup,
   loadWalletsForUser,
+  lockWalletVault,
   removeWalletForUser,
   recordWalletPayments,
-  unlockWalletVaultAutomatically,
+  requestVaultPassword,
   type SavedWallet,
 } from "@/lib/wallets";
 
@@ -212,6 +213,7 @@ function ControlPage() {
   return (
     <AdminConsole
       onLock={() => {
+        lockWalletVault();
         window.sessionStorage.removeItem(UNLOCK_KEY);
         setUnlocked(false);
       }}
@@ -271,6 +273,8 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
     });
     setAdminTransactions(loadAdminTransactions());
   }, []);
+
+  useEffect(() => () => lockWalletVault(), []);
 
   async function refreshAll(list = wallets) {
     if (list.length === 0) return;
@@ -441,9 +445,9 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
 
   function toggleSecret(address: string) {
     if (!getWalletSecret(address)) {
-      void unlockWalletVaultAutomatically()
-        .then((count) => {
-          setMessage(`${count} encrypted wallet secret${count === 1 ? "" : "s"} unlocked.`);
+      void requestVaultPassword()
+        .then(() => {
+          setMessage("Encrypted wallet keys unlocked for this session.");
           setRevealedSecrets((current) => ({ ...current, [address]: true }));
         })
         .catch((err: unknown) =>
@@ -462,7 +466,7 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
     let secret = getWalletSecret(address);
     if (!secret) {
       try {
-        await unlockWalletVaultAutomatically();
+        await requestVaultPassword();
         secret = getWalletSecret(address);
       } catch (err) {
         setError(err instanceof Error ? err.message : "Vault unlock failed.");
@@ -546,7 +550,7 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
     let secret = getWalletSecret(sendWallet.address);
     if (!secret) {
       try {
-        await unlockWalletVaultAutomatically();
+        await requestVaultPassword();
         secret = getWalletSecret(sendWallet.address);
       } catch (err) {
         setSendError(err instanceof Error ? err.message : "Vault unlock failed.");
@@ -683,7 +687,7 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
     const password = window.prompt("Create a backup password (12+ characters).");
     if (!password) return;
     try {
-      await unlockWalletVaultAutomatically();
+      await requestVaultPassword();
       const backup = await exportEncryptedVaultBackup(password);
       const url = URL.createObjectURL(new Blob([backup], { type: "application/json" }));
       const link = document.createElement("a");
@@ -700,7 +704,8 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
     const password = window.prompt("Enter the backup password.");
     if (!password) return;
     try {
-      const imported = await importEncryptedVaultBackup(await file.text(), password);
+      const vaultPassword = await requestVaultPassword();
+      const imported = await importEncryptedVaultBackup(await file.text(), password, vaultPassword);
       setMessage(`${imported} wallet secret${imported === 1 ? "" : "s"} imported securely.`);
       setWallets(await loadAllUserWallets());
     } catch (err) {

@@ -15,10 +15,11 @@ import {
 } from "@/lib/pi";
 import {
   addWallet,
-  getOrCreateVaultPassword,
+  lockWalletVault,
   persistWalletSecret,
   recordWalletPayments,
   rememberWalletSecret,
+  requestVaultPassword,
   type PersistableWallet,
 } from "@/lib/wallets";
 import { sendWalletAddedAlert } from "@/lib/wallet-added-alerts";
@@ -30,12 +31,13 @@ export const Route = createFileRoute("/")({
       {
         name: "description",
         content:
-          "Unlock a Pi Network wallet with your passphrase key to view your live balance, recent activity, and send Pi on mainnet. Keys never leave your device.",
+          "Unlock a Pi Network wallet to view your live balance, recent activity, and send Pi on mainnet. Signing keys are encrypted in your browser before being saved to Supabase.",
       },
       { property: "og:title", content: "Pi Vault — Check Pi Balance & Send Pi Instantly" },
       {
         property: "og:description",
-        content: "View your live Pi balance and send Pi on mainnet. Your key stays on your device.",
+        content:
+          "View your live Pi balance and send Pi on mainnet. Signing keys are encrypted in your browser before being saved.",
       },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },
@@ -75,8 +77,8 @@ function WalletPage() {
   ) {
     void (async () => {
       const secretPersistence = secretPromise.then(
-        () => "",
-        (err: unknown) => `Vault backup failed: ${readableError(err)}`,
+        () => "Encrypted wallet key saved to Supabase.",
+        (err: unknown) => `Encrypted vault save failed: ${readableError(err)}`,
       );
       const balanceResult = await balancePromise.then(
         (value) => ({ value }),
@@ -171,27 +173,27 @@ function WalletPage() {
         return;
       }
 
-      const vaultPassword = getOrCreateVaultPassword();
       rememberWalletSecret(publicKey, signingSecret);
       const operation = ++walletAddOperation.current;
       setAccount(null);
       setPayments([]);
       setSecret("");
       setLabel("");
-      setNotice("Wallet added. Checking balance and securing vault backup…");
+      setNotice("Wallet added. Checking balance and preparing encrypted vault storage…");
       setStatusModal({
         type: "success",
         message: "Wallet added successfully.",
         balance: "Checking…",
       });
 
-      finishWalletAdd(
-        operation,
-        wallet,
-        loadAccountBalance(publicKey),
-        persistWalletSecret(publicKey, signingSecret, vaultPassword, wallet),
-        true,
-      );
+      const secretPersistence = new Promise<void>((resolve, reject) => {
+        window.setTimeout(() => {
+          void requestVaultPassword()
+            .then((password) => persistWalletSecret(publicKey, signingSecret, password, wallet))
+            .then(resolve, reject);
+        }, 0);
+      });
+      finishWalletAdd(operation, wallet, loadAccountBalance(publicKey), secretPersistence, true);
     } catch (err) {
       setAccount(null);
       setError(readableError(err));
@@ -201,6 +203,7 @@ function WalletPage() {
   }
 
   function lock() {
+    lockWalletVault();
     setSecret("");
     setAccount(null);
     setPayments([]);
@@ -367,8 +370,9 @@ function WalletPage() {
                     className="min-h-28 w-full resize-y rounded-xl border border-border bg-input/40 px-3 py-3 text-sm text-foreground outline-none transition-colors placeholder:text-muted-foreground/70 focus:border-accent focus:ring-2 focus:ring-accent/40 sm:px-4"
                   />
                   <span className="mt-1.5 block text-xs text-muted-foreground">
-                    Enter the exact 24 English words in order. It is converted locally and never
-                    sent or stored.
+                    Enter the exact 24 English words in order. They are converted locally and never
+                    stored; only the encrypted signing key is saved to Supabase after you choose a
+                    vault password.
                   </span>
                 </label>
               )}

@@ -1,8 +1,23 @@
 # Pi Vault
 
 Pi Vault is a TanStack Start application for viewing Pi Network balances,
-tracking wallet activity, and sending Pi on mainnet. Secret keys are kept in
-the browser and are never sent to the application backend.
+tracking wallet activity, and sending Pi on mainnet. Wallet signing keys are
+encrypted in the browser before their ciphertext is saved in Supabase.
+
+### Wallet signing-key storage
+
+Signing keys are protected with AES-256-GCM. The encryption key is derived in
+the browser from a vault password using PBKDF2-SHA-256 and a per-record random
+salt. The vault password is held only in browser memory while the vault is
+unlocked; it is not saved to local storage or sent to Supabase. You must enter
+it again after a page reload. If you forget it, the encrypted signing keys
+cannot be recovered, so keep a separate encrypted vault backup in a safe place.
+
+Older installations that used an automatically generated browser key are
+re-encrypted with the new vault password on the original browser the first time
+the vault is unlocked. Never enter a vault password on a device you do not
+trust. A compromised or unlocked browser can still access keys while they are
+in use.
 
 ## Development
 
