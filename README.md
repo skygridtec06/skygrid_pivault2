@@ -53,8 +53,17 @@ server-only Supabase variables in the backend's production environment.
 - `backend/` contains the standalone Vercel API deployment (`/api/health` and
   `/api/balance-alert`, `/api/wallet-added-alert`, and `/api/pi-horizon`) used
   by the separate backend project. Pi Horizon reads and signed transaction
-  submissions are proxied server-side to avoid browser CORS failures.
+  submissions are proxied server-side to avoid browser CORS failures. Its
+  `/api/monitor-wallets` cron runs every minute as a recovery path for payment
+  alerts.
 - `backend/worker/` contains the Railway always-on Pi Horizon stream monitor.
+  Deploy it from the `backend/` directory using its Dockerfile and configure
+  `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, and the SMS provider variables
+  above. The worker streams wallet payments continuously and queues SMS alerts
+  for retry if the provider is unavailable. Apply the Supabase migrations before
+  deploying the worker or enabling the cron. The cron is a fallback, not a
+  two-second delivery guarantee; delivery also depends on Horizon and the SMS
+  provider.
 - `src/` contains the browser application and TanStack route/client code.
 - `src/Server/` is a legacy-named client-only module containing Pi SDK and
   local-wallet helpers. It uses browser storage and client-side signing; it is

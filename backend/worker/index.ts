@@ -1,3 +1,5 @@
+import { drainPaymentAlerts, enqueuePaymentAlert } from "../lib/payment-alerts.ts";
+
 type Wallet = { id: string; address: string; user_id: string };
 type PaymentRecord = {
   id: string;
@@ -44,16 +46,28 @@ async function loadWallets(): Promise<Wallet[]> {
   return (await response.json()) as Wallet[];
 }
 
-async function loadBalance(address: string): Promise<number> {
-  const response = await fetch(`${HORIZON_URL}/accounts/${encodeURIComponent(address)}`, {
-    headers: { accept: "application/json" },
-  });
-  if (response.status === 404) return 0;
-  if (!response.ok) throw new Error(`Pi balance query failed with HTTP ${response.status}.`);
-  const body = (await response.json()) as {
-    balances?: Array<{ asset_type?: string; balance?: string }>;
-  };
-  return Number(body.balances?.find((item) => item.asset_type === "native")?.balance ?? 0);
+async function loadCursor(walletId: string): Promise<string> {
+  const response = await supabaseFetch(
+    `wallet_payment_alerts?wallet_id=eq.${encodeURIComponent(walletId)}&select=external_id&order=created_at.desc&limit=1`,
+  );
+  if (!response.ok) {
+    throw new Error(`Supabase payment cursor query failed with HTTP ${response.status}.`);
+  }
+  const rows = (await response.json()) as Array<{ external_id?: string }>;
+  if (rows[0]?.external_id) return rows[0].external_id;
+
+  const existingTransactions = await supabaseFetch(
+    `wallet_transactions?wallet_id=eq.${encodeURIComponent(walletId)}&select=external_id&order=recorded_at.desc&limit=1`,
+  );
+  if (!existingTransactions.ok) {
+    throw new Error(
+      `Supabase wallet history lookup failed with HTTP ${existingTransactions.status}.`,
+    );
+  }
+  const transactionRows = (await existingTransactions.json()) as Array<{
+    external_id?: string;
+  }>;
+  return transactionRows[0]?.external_id ?? "now";
 }
 
 async function recordPayment(wallet: Wallet, payment: PaymentRecord): Promise<boolean> {
@@ -94,46 +108,8 @@ async function recordPayment(wallet: Wallet, payment: PaymentRecord): Promise<bo
     throw new Error(`Supabase transaction insert failed with HTTP ${response.status}: ${detail}`);
   }
   const inserted = (await response.json()) as unknown[];
-  return inserted.length > 0 && direction === "in" && amount > 0;
-}
-
-async function sendSms(wallet: string, amount: number, balance: number, receivedAt: string) {
-  const apiKey = required("TEXTSMS_API_KEY");
-  const partnerId = required("TEXTSMS_PARTNER_ID");
-  const shortcode = required("TEXTSMS_SHORTCODE");
-  const phone = required("ADMIN_SMS_PHONE").replace(/\D/g, "");
-  const mobile = phone.startsWith("254") ? phone : phone.startsWith("0") ? `254${phone.slice(1)}` : phone;
-  const response = await fetch(
-    process.env["TEXTSMS_API_URL"] ?? "https://sms.textsms.co.ke/api/services/sendsms/",
-    {
-      method: "POST",
-      headers: { "content-type": "application/json", accept: "application/json" },
-      body: JSON.stringify({
-        apikey: apiKey,
-        partnerID: partnerId,
-        shortcode,
-        mobile,
-        message: [
-          "Pi wallet received funds.",
-          `Wallet: ${wallet}`,
-          `Received: ${amount.toFixed(7)} Pi`,
-          `Date: ${new Date(receivedAt).toLocaleString("en-KE")}`,
-          `Available balance: ${balance.toFixed(7)} Pi`,
-        ].join("\n"),
-      }),
-    },
-  );
-  if (!response.ok) throw new Error(`SMS provider returned HTTP ${response.status}.`);
-  const result = (await response.json()) as {
-    responses?: Array<{
-      "respose-code"?: number;
-      "response-code"?: number;
-      "response-description"?: string;
-    }>;
-  };
-  const provider = result.responses?.[0];
-  const code = Number(provider?.["respose-code"] ?? provider?.["response-code"]);
-  if (code !== 200) throw new Error(provider?.["response-description"] ?? "SMS provider rejected alert.");
+  const isPi = payment.asset_type === "native" || payment.type === "create_account";
+  return inserted.length > 0 && direction === "in" && amount > 0 && isPi;
 }
 
 function parseSseBlock(block: string): PaymentRecord | null {
@@ -155,8 +131,9 @@ async function streamWallet(wallet: Wallet): Promise<void> {
   const controller = new AbortController();
   streams.set(wallet.address, controller);
   try {
+    const cursor = await loadCursor(wallet.id);
     const response = await fetch(
-      `${HORIZON_URL}/accounts/${encodeURIComponent(wallet.address)}/payments?cursor=now`,
+      `${HORIZON_URL}/accounts/${encodeURIComponent(wallet.address)}/payments?cursor=${encodeURIComponent(cursor)}`,
       {
         headers: { accept: "text/event-stream" },
         signal: controller.signal,
@@ -165,6 +142,7 @@ async function streamWallet(wallet: Wallet): Promise<void> {
     if (!response.ok || !response.body) {
       throw new Error(`Pi stream failed with HTTP ${response.status}.`);
     }
+    console.log(`Pi payment stream connected for ${wallet.address.slice(0, 8)}.`);
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
@@ -178,17 +156,30 @@ async function streamWallet(wallet: Wallet): Promise<void> {
         const payment = parseSseBlock(block);
         if (!payment) continue;
         try {
-          if (await recordPayment(wallet, payment)) {
-            await sendSms(wallet.address, Number(payment.amount ?? payment.starting_balance ?? 0), await loadBalance(wallet.address), payment.created_at);
-            console.log(`Alert sent for ${wallet.address}: ${payment.id}`);
+          const to = payment.to ?? payment.account ?? "";
+          const amount = Number(payment.amount ?? payment.starting_balance ?? 0);
+          const isPi = payment.asset_type === "native" || payment.type === "create_account";
+          if (to === wallet.address && amount > 0 && isPi) {
+            await enqueuePaymentAlert({
+              walletId: wallet.id,
+              userId: wallet.user_id,
+              address: wallet.address,
+              externalId: payment.id || payment.transaction_hash,
+              amount,
+              receivedAt: payment.created_at,
+            });
+            await drainPaymentAlerts();
           }
+          await recordPayment(wallet, payment);
         } catch (error) {
           console.error(`Payment handling failed for ${wallet.address}`, error);
         }
       }
     }
   } catch (error) {
-    if (!controller.signal.aborted) console.error(`Pi stream disconnected for ${wallet.address}`, error);
+    if (!controller.signal.aborted) {
+      console.error(`Pi stream disconnected for ${wallet.address.slice(0, 8)}.`, error);
+    }
   } finally {
     streams.delete(wallet.address);
     if (!controller.signal.aborted) {
@@ -208,8 +199,27 @@ async function reconcileStreams() {
   }
 }
 
-console.log("Starting real-time Pi wallet monitor.");
+console.log("Starting real-time Pi wallet monitor with durable SMS delivery.");
+await drainPaymentAlerts();
 await reconcileStreams();
 setInterval(() => {
   reconcileStreams().catch((error) => console.error("Wallet discovery failed", error));
 }, 30_000);
+
+let drainingAlerts = false;
+setInterval(() => {
+  if (drainingAlerts) return;
+  drainingAlerts = true;
+  drainPaymentAlerts()
+    .catch((error) => console.error("Payment alert queue processing failed", error))
+    .finally(() => {
+      drainingAlerts = false;
+    });
+}, 10_000);
+
+for (const signal of ["SIGTERM", "SIGINT"] as const) {
+  process.on(signal, () => {
+    console.log(`Received ${signal}; closing Pi payment streams.`);
+    for (const controller of streams.values()) controller.abort();
+  });
+}
