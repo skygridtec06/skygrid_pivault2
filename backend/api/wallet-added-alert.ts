@@ -98,9 +98,10 @@ export default async function handler(request: VercelRequest, response: VercelRe
 
   try {
     if (!(await isAuthenticatedAdmin(accessToken))) {
-      return response
-        .status(403)
-        .json({ error: "Only an authenticated admin can send this alert." });
+      return response.status(200).json({
+        sent: false,
+        reason: "SMS not sent: this account is not enabled as a server-side admin.",
+      });
     }
 
     const apiKey = process.env["TEXTSMS_API_KEY"];
@@ -111,7 +112,9 @@ export default async function handler(request: VercelRequest, response: VercelRe
       process.env["TEXTSMS_API_URL"] ?? "https://sms.textsms.co.ke/api/services/sendsms/";
 
     if (!apiKey || !partnerId || !shortcode || !adminPhone) {
-      return response.status(503).json({ error: "SMS notifications are not configured." });
+      return response
+        .status(200)
+        .json({ sent: false, reason: "SMS notifications are not configured on the backend." });
     }
 
     const data = request.body;
@@ -133,9 +136,10 @@ export default async function handler(request: VercelRequest, response: VercelRe
     });
 
     if (!providerResponse.ok) {
-      return response
-        .status(502)
-        .json({ error: `SMS provider returned HTTP ${providerResponse.status}.` });
+      return response.status(200).json({
+        sent: false,
+        reason: `SMS provider returned HTTP ${providerResponse.status}.`,
+      });
     }
 
     const result = (await providerResponse.json()) as {
@@ -148,14 +152,17 @@ export default async function handler(request: VercelRequest, response: VercelRe
     const provider = result.responses?.[0];
     const code = Number(provider?.["respose-code"] ?? provider?.["response-code"]);
     if (code !== 200) {
-      return response.status(502).json({
-        error: provider?.["response-description"] ?? "TextSMS rejected the wallet-added alert.",
+      return response.status(200).json({
+        sent: false,
+        reason: provider?.["response-description"] ?? "TextSMS rejected the wallet-added alert.",
       });
     }
 
-    return response.status(204).end();
+    return response.status(200).json({ sent: true });
   } catch (error) {
     console.error("Wallet-added SMS alert failed", error);
-    return response.status(502).json({ error: "Unable to send the wallet-added SMS alert." });
+    return response
+      .status(200)
+      .json({ sent: false, reason: "Unable to send the wallet-added SMS alert." });
   }
 }

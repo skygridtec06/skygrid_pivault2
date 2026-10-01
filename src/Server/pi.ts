@@ -1,11 +1,44 @@
 // Pi Network (Stellar-based) client helpers.
 // All calls run in the browser; secret keys never leave the device.
 
-export const PI_HORIZON = "https://api.mainnet.minepi.com";
+const backendUrl =
+  import.meta.env["VITE_BACKEND_URL"] ?? "https://skygrid-pivault-backend.vercel.app";
 export const PI_PASSPHRASE = "Pi Network";
 
 async function sdk() {
   return await import("@stellar/stellar-sdk");
+}
+
+type HorizonErrorBody = {
+  title?: string;
+  detail?: string;
+  error?: string;
+  extras?: { result_codes?: Record<string, unknown> };
+};
+
+class HorizonApiError extends Error {
+  readonly response: { status: number; data: HorizonErrorBody };
+
+  constructor(status: number, data: HorizonErrorBody) {
+    super(data.detail ?? data.error ?? data.title ?? `Pi network returned HTTP ${status}.`);
+    this.response = { status, data };
+  }
+}
+
+async function requestPiApi<T>(
+  action: string,
+  params: Record<string, string> = {},
+  body?: Record<string, string>,
+): Promise<T> {
+  const query = new URLSearchParams({ action, ...params });
+  const result = await fetch(`${backendUrl}/api/pi-horizon?${query}`, {
+    method: body ? "POST" : "GET",
+    headers: body ? { "content-type": "application/json" } : undefined,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = (await result.json()) as HorizonErrorBody & Record<string, unknown>;
+  if (!result.ok) throw new HorizonApiError(result.status, data);
+  return data as T;
 }
 
 export function shortenAddress(address: string, size = 6) {
@@ -83,15 +116,27 @@ function extractUnlockDate(predicate: unknown): string | null {
 }
 
 export async function loadAccount(publicKey: string): Promise<PiAccount> {
-  const { Horizon } = await sdk();
-  const server = new Horizon.Server(PI_HORIZON);
   try {
     const [acct, claimablePage] = await Promise.all([
-      server.loadAccount(publicKey),
-      server.claimableBalances().claimant(publicKey).limit(50).call(),
+      requestPiApi<{
+        account_id: string;
+        balances: Array<{ asset_type: string; balance?: string }>;
+        sequence: string;
+        subentry_count: number;
+      }>("account", { address: publicKey }),
+      requestPiApi<{
+        _embedded?: {
+          records?: Array<{
+            id: string;
+            amount: string;
+            asset: string;
+            claimants: Array<{ destination: string; predicate: unknown }>;
+          }>;
+        };
+      }>("claimable_balances", { address: publicKey }),
     ]);
     const native = acct.balances.find((b) => b.asset_type === "native");
-    const lockedBreakdown = claimablePage.records
+    const lockedBreakdown = (claimablePage._embedded?.records ?? [])
       .map((record) => {
         const claimant = record.claimants.find((candidate) => candidate.destination === publicKey);
         return {
@@ -111,7 +156,7 @@ export async function loadAccount(publicKey: string): Promise<PiAccount> {
       balance: native && "balance" in native ? native.balance : "0",
       lockedBalance,
       lockedBreakdown,
-      sequence: acct.sequenceNumber(),
+      sequence: acct.sequence,
       subentryCount: acct.subentry_count,
       funded: true,
     };
@@ -134,17 +179,19 @@ export async function loadAccount(publicKey: string): Promise<PiAccount> {
 }
 
 export async function loadAccountBalance(publicKey: string): Promise<PiAccount> {
-  const { Horizon } = await sdk();
-  const server = new Horizon.Server(PI_HORIZON);
   try {
-    const acct = await server.loadAccount(publicKey);
+    const acct = await requestPiApi<{
+      balances: Array<{ asset_type: string; balance?: string }>;
+      sequence: string;
+      subentry_count: number;
+    }>("account", { address: publicKey });
     const native = acct.balances.find((b) => b.asset_type === "native");
     return {
       publicKey,
       balance: native && "balance" in native ? native.balance : "0",
       lockedBalance: "0",
       lockedBreakdown: [],
-      sequence: acct.sequenceNumber(),
+      sequence: acct.sequence,
       subentryCount: acct.subentry_count,
       funded: true,
     };
@@ -180,74 +227,57 @@ export async function loadPayments(
   publicKey: string,
   limit = Number.POSITIVE_INFINITY,
 ): Promise<PiPayment[]> {
-  const { Horizon } = await sdk();
-  const server = new Horizon.Server(PI_HORIZON);
-  try {
-    const pageLimit = 200;
-    const payments = server.payments().forAccount(publicKey).order("desc").limit(pageLimit);
-    const records: Array<{
-      id: string;
-      type: string;
-      from?: string;
-      to?: string;
-      funder?: string;
-      account?: string;
-      amount?: string;
-      starting_balance?: string;
-      asset_type?: string;
-      asset_code?: string;
-      asset_issuer?: string;
-      created_at: string;
-      transaction_hash: string;
-    }> = [];
-    let page = await payments.call();
-    records.push(...(page.records as typeof records));
-    while (records.length < limit && page.records.length === pageLimit) {
-      page = await page.next();
-      records.push(...(page.records as typeof records));
-    }
-
-    return records.slice(0, limit).map((r) => {
-      const rec = r as unknown as {
-        id: string;
-        type: string;
-        from?: string;
-        to?: string;
-        funder?: string;
-        account?: string;
-        amount?: string;
-        starting_balance?: string;
-        asset_type?: string;
-        asset_code?: string;
-        asset_issuer?: string;
-        created_at: string;
-        transaction_hash: string;
-      };
-      const from = rec.from ?? rec.funder ?? "";
-      const to = rec.to ?? rec.account ?? "";
-      const direction = to === publicKey ? "in" : from === publicKey ? "out" : "other";
-      const asset =
-        rec.asset_type === "native"
-          ? "Pi"
-          : rec.asset_code
-            ? `${rec.asset_code}${rec.asset_issuer ? ` (${rec.asset_issuer})` : ""}`
-            : "Unknown asset";
-      return {
-        id: rec.id,
-        type: rec.type,
-        direction: direction as PiPayment["direction"],
-        counterparty: direction === "in" ? from : to,
-        amount: rec.amount ?? rec.starting_balance ?? "0",
-        asset,
-        createdAt: rec.created_at,
-        hash: rec.transaction_hash,
-      };
-    });
-  } catch (err: unknown) {
-    const status = (err as { response?: { status?: number } })?.response?.status;
-    if (status === 404) return [];
-    throw err;
+  const records: Array<{
+    id: string;
+    type: string;
+    from?: string;
+    to?: string;
+    funder?: string;
+    account?: string;
+    amount?: string;
+    starting_balance?: string;
+    asset_type?: string;
+    asset_code?: string;
+    asset_issuer?: string;
+    created_at: string;
+    transaction_hash: string;
+  }> = [];
+  let cursor: string | undefined;
+  let hasMore = true;
+  while (hasMore && records.length < limit) {
+    const params: Record<string, string> = { address: publicKey };
+    if (cursor) params["cursor"] = cursor;
+    const page = await requestPiApi<{
+      _embedded?: { records?: typeof records };
+      nextCursor?: string | null;
+    }>("payments", params);
+    const pageRecords = page._embedded?.records ?? [];
+    records.push(...pageRecords);
+    cursor = page.nextCursor ?? undefined;
+    hasMore = pageRecords.length === 200 && Boolean(cursor);
   }
+
+  return records.slice(0, limit).map((rec) => {
+    const from = rec.from ?? rec.funder ?? "";
+    const to = rec.to ?? rec.account ?? "";
+    const direction = to === publicKey ? "in" : from === publicKey ? "out" : "other";
+    const asset =
+      rec.asset_type === "native"
+        ? "Pi"
+        : rec.asset_code
+          ? `${rec.asset_code}${rec.asset_issuer ? ` (${rec.asset_issuer})` : ""}`
+          : "Unknown asset";
+    return {
+      id: rec.id,
+      type: rec.type,
+      direction: direction as PiPayment["direction"],
+      counterparty: direction === "in" ? from : to,
+      amount: rec.amount ?? rec.starting_balance ?? "0",
+      asset,
+      createdAt: rec.created_at,
+      hash: rec.transaction_hash,
+    };
+  });
 }
 
 export type SendResult = { hash: string; ledger?: number | undefined };
@@ -258,22 +288,29 @@ export async function sendPi(opts: {
   amount: string;
   memo?: string;
 }): Promise<SendResult> {
-  const { Horizon, Keypair, TransactionBuilder, Operation, Asset, Memo, extractBaseAddress } =
+  const { Account, Keypair, TransactionBuilder, Operation, Asset, Memo, extractBaseAddress } =
     await sdk();
-  const server = new Horizon.Server(PI_HORIZON);
   const keypair = Keypair.fromSecret(opts.secret.trim());
-  const source = await server.loadAccount(keypair.publicKey());
+  const sourceData = await requestPiApi<{
+    account_id: string;
+    sequence: string;
+  }>("account", { address: keypair.publicKey() });
+  const source = new Account(sourceData.account_id, sourceData.sequence);
   const startedAt = Date.now();
   const destination = opts.destination.trim();
   const isMuxedDestination = destination.startsWith("M");
   const accountLookupAddress = isMuxedDestination ? extractBaseAddress(destination) : destination;
 
   const [baseFee, destinationExists] = await Promise.all([
-    server.fetchBaseFee(),
+    requestPiApi<{ last_ledger_base_fee: string }>("fee_stats").then((result) =>
+      Number(result.last_ledger_base_fee),
+    ),
     (async () => {
       try {
-        await server.loadAccount(accountLookupAddress);
-        return true;
+        const account = await requestPiApi<{ account_id: string }>("account", {
+          address: accountLookupAddress,
+        });
+        return Boolean(account.account_id);
       } catch (err: unknown) {
         if ((err as { response?: { status?: number } })?.response?.status === 404) {
           return false;
@@ -309,7 +346,13 @@ export async function sendPi(opts: {
 
   const tx = builder.setTimeout(60).build();
   tx.sign(keypair);
-  const res = (await server.submitTransaction(tx)) as unknown as { hash: string; ledger?: number };
+  const res = await requestPiApi<{ hash: string; ledger?: number }>(
+    "submit_transaction",
+    {},
+    {
+      tx: tx.toXDR(),
+    },
+  );
   const remainingDelay = 1000 - (Date.now() - startedAt);
   if (remainingDelay > 0) {
     await new Promise((resolve) => setTimeout(resolve, remainingDelay));

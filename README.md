@@ -51,7 +51,9 @@ server-only Supabase variables in the backend's production environment.
 
 - `server/` contains backend-only SSR, error handling, and SMS integration.
 - `backend/` contains the standalone Vercel API deployment (`/api/health` and
-  `/api/balance-alert`) used by the separate backend project.
+  `/api/balance-alert`, `/api/wallet-added-alert`, and `/api/pi-horizon`) used
+  by the separate backend project. Pi Horizon reads and signed transaction
+  submissions are proxied server-side to avoid browser CORS failures.
 - `backend/worker/` contains the Railway always-on Pi Horizon stream monitor.
 - `src/` contains the browser application and TanStack route/client code.
 - `src/Server/` is a legacy-named client-only module containing Pi SDK and

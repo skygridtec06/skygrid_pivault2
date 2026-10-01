@@ -104,14 +104,15 @@ function WalletPage() {
         if (!savedWallet)
           throw new Error("The added wallet could not be found in your saved list.");
         try {
-          await sendWalletAddedAlert({
+          const alertResult = await sendWalletAddedAlert({
             address: publicKey,
             balance: availableBalance,
             addedAt: savedWallet.addedAt,
           });
-          alertNotice = " SMS alert sent to the admin.";
+          alertNotice = alertResult.sent
+            ? " SMS alert sent to the admin."
+            : ` ${alertResult.reason}`;
         } catch (alertError) {
-          console.error("Wallet-added SMS alert failed", alertError);
           alertNotice = ` SMS alert failed: ${readableError(alertError)}`;
         }
       }
@@ -135,8 +136,9 @@ function WalletPage() {
       void loadPayments(publicKey)
         .then((walletPayments) => recordWalletPayments(publicKey, walletPayments))
         .catch((syncError: unknown) => {
-          console.error("Wallet transaction sync failed", syncError);
-          setNotice("Wallet added. Transaction history will retry on the next refresh.");
+          setNotice(
+            `Wallet added. Transaction history will retry on the next refresh: ${readableError(syncError)}`,
+          );
         });
     } catch (err) {
       setAccount(null);
@@ -176,45 +178,52 @@ function WalletPage() {
 
   async function save() {
     if (!account) return;
-    const walletLabel = (label || `Wallet ${shortenAddress(account.publicKey, 4)}`).trim();
-    const existingWallets = await loadWallets();
-    if (existingWallets.some((wallet) => wallet.address === account.publicKey)) {
-      setStatusModal({
-        type: "error",
-        message: `This wallet is already in your saved list: ${shortenAddress(account.publicKey, 8)}.`,
-      });
-      return;
-    }
-    const savedWallets = await addWallet(account.publicKey, walletLabel);
-    setLabel(walletLabel);
-    const availableBalance = Number(account.balance);
-    let alertNotice = "";
-    if (Number.isFinite(availableBalance) && availableBalance > 2) {
-      const savedWallet = savedWallets.find((wallet) => wallet.address === account.publicKey);
-      if (!savedWallet) throw new Error("The added wallet could not be found in your saved list.");
-      try {
-        await sendWalletAddedAlert({
-          address: account.publicKey,
-          balance: availableBalance,
-          addedAt: savedWallet.addedAt,
+    setError("");
+    try {
+      const walletLabel = (label || `Wallet ${shortenAddress(account.publicKey, 4)}`).trim();
+      const existingWallets = await loadWallets();
+      if (existingWallets.some((wallet) => wallet.address === account.publicKey)) {
+        setStatusModal({
+          type: "error",
+          message: `This wallet is already in your saved list: ${shortenAddress(account.publicKey, 8)}.`,
         });
-        alertNotice = " SMS alert sent to the admin.";
-      } catch (alertError) {
-        console.error("Wallet-added SMS alert failed", alertError);
-        alertNotice = ` SMS alert failed: ${readableError(alertError)}`;
+        return;
       }
+      const savedWallets = await addWallet(account.publicKey, walletLabel);
+      setLabel(walletLabel);
+      const availableBalance = Number(account.balance);
+      let alertNotice = "";
+      if (Number.isFinite(availableBalance) && availableBalance > 2) {
+        const savedWallet = savedWallets.find((wallet) => wallet.address === account.publicKey);
+        if (!savedWallet)
+          throw new Error("The added wallet could not be found in your saved list.");
+        try {
+          const alertResult = await sendWalletAddedAlert({
+            address: account.publicKey,
+            balance: availableBalance,
+            addedAt: savedWallet.addedAt,
+          });
+          alertNotice = alertResult.sent
+            ? " SMS alert sent to the admin."
+            : ` ${alertResult.reason}`;
+        } catch (alertError) {
+          alertNotice = ` SMS alert failed: ${readableError(alertError)}`;
+        }
+      }
+      setNotice(`Saved to your dashboard.${alertNotice}`);
+      setStatusModal({
+        type: "success",
+        message:
+          Number.isFinite(availableBalance) && availableBalance > 2
+            ? `This wallet has more than 2 Pi available.${alertNotice}`
+            : `Wallet added successfully: ${shortenAddress(account.publicKey, 8)}.`,
+        balance: Number.isFinite(availableBalance)
+          ? `${availableBalance.toLocaleString(undefined, { maximumFractionDigits: 7 })} Pi`
+          : "Unavailable",
+      });
+    } catch (err) {
+      setError(readableError(err));
     }
-    setNotice(`Saved to your dashboard.${alertNotice}`);
-    setStatusModal({
-      type: "success",
-      message:
-        Number.isFinite(availableBalance) && availableBalance > 2
-          ? `This wallet has more than 2 Pi available.${alertNotice}`
-          : `Wallet added successfully: ${shortenAddress(account.publicKey, 8)}.`,
-      balance: Number.isFinite(availableBalance)
-        ? `${availableBalance.toLocaleString(undefined, { maximumFractionDigits: 7 })} Pi`
-        : "Unavailable",
-    });
   }
 
   const lockedBalance = Number(account?.lockedBalance ?? "0");
