@@ -32,8 +32,28 @@ async function proxyGet(
   const upstream = await fetch(`${HORIZON_URL}${path}`, {
     headers: { accept: "application/json" },
   });
-  const body: unknown = await upstream.json();
-  if (!upstream.ok) return response.status(upstream.status).json(body);
+  const content = await upstream.text();
+  let body: unknown;
+  try {
+    body = JSON.parse(content) as unknown;
+  } catch {
+    body = {
+      error: `Pi network returned an invalid response (HTTP ${upstream.status}).`,
+      upstreamStatus: upstream.status,
+    };
+  }
+  if (!upstream.ok) {
+    const details = body && typeof body === "object" ? (body as Record<string, unknown>) : {};
+    return response.status(200).json({
+      ...details,
+      error:
+        details["detail"] ?? details["title"] ?? `Pi network returned HTTP ${upstream.status}.`,
+      upstreamStatus: upstream.status,
+    });
+  }
+  if (body && typeof body === "object" && "error" in body && typeof body.error === "string") {
+    return response.status(200).json(body);
+  }
 
   if (includeNextCursor && body && typeof body === "object") {
     const page = body as {
@@ -74,11 +94,31 @@ export default async function handler(request: VercelRequest, response: VercelRe
         },
         body: new URLSearchParams({ tx }),
       });
-      const body: unknown = await upstream.json();
-      return response.status(upstream.status).json(body);
+      const content = await upstream.text();
+      let body: unknown;
+      try {
+        body = JSON.parse(content) as unknown;
+      } catch {
+        body = {
+          error: `Pi network returned an invalid response (HTTP ${upstream.status}).`,
+          upstreamStatus: upstream.status,
+        };
+      }
+      if (!upstream.ok) {
+        const details = body && typeof body === "object" ? (body as Record<string, unknown>) : {};
+        return response.status(200).json({
+          ...details,
+          error:
+            details["detail"] ?? details["title"] ?? `Pi network returned HTTP ${upstream.status}.`,
+          upstreamStatus: upstream.status,
+        });
+      }
+      return response.status(200).json(body);
     } catch (error) {
       console.error("Pi transaction submission proxy failed", error);
-      return response.status(502).json({ error: "Unable to contact the Pi network." });
+      return response
+        .status(200)
+        .json({ error: "Unable to contact the Pi network.", upstreamStatus: 502 });
     }
   }
 
@@ -91,7 +131,9 @@ export default async function handler(request: VercelRequest, response: VercelRe
       return await proxyGet("/fee_stats", response);
     } catch (error) {
       console.error("Pi fee lookup proxy failed", error);
-      return response.status(502).json({ error: "Unable to contact the Pi network." });
+      return response
+        .status(200)
+        .json({ error: "Unable to contact the Pi network.", upstreamStatus: 502 });
     }
   }
 
@@ -126,6 +168,8 @@ export default async function handler(request: VercelRequest, response: VercelRe
     return response.status(400).json({ error: "Unsupported Pi network request." });
   } catch (error) {
     console.error("Pi network proxy failed", error);
-    return response.status(502).json({ error: "Unable to contact the Pi network." });
+    return response
+      .status(200)
+      .json({ error: "Unable to contact the Pi network.", upstreamStatus: 502 });
   }
 }

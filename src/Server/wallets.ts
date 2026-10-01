@@ -66,8 +66,9 @@ export async function persistWalletSecret(address: string, secret: string, passw
     .from("wallets")
     .select("id, user_id")
     .eq("address", address)
-    .single();
+    .maybeSingle();
   if (walletError) throw new Error(walletError.message);
+  if (!wallet) throw new Error("The saved wallet could not be found while recording transactions.");
 
   const salt = crypto.getRandomValues(new Uint8Array(16));
   const iv = crypto.getRandomValues(new Uint8Array(12));

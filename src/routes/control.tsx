@@ -318,28 +318,42 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
       return;
     }
     setLoadedLoading(true);
-    const records = await Promise.all(
-      list.map(async (wallet) => {
+    const records: LoadedPayment[] = [];
+    let failedWallets = 0;
+    let firstFailure = "";
+    let cursor = 0;
+    const worker = async () => {
+      while (cursor < list.length) {
+        const wallet = list[cursor++];
+        if (!wallet) break;
         try {
           const payments = await loadPayments(wallet.address);
           await recordWalletPayments(wallet.address, payments);
-          return payments
-            .filter(
-              (payment) =>
-                payment.direction === "in" &&
-                Date.parse(payment.createdAt) >= Date.parse(wallet.addedAt),
-            )
-            .map((payment) => ({ wallet, payment }));
-        } catch {
-          return [];
+          records.push(
+            ...payments
+              .filter(
+                (payment) =>
+                  payment.direction === "in" &&
+                  Date.parse(payment.createdAt) >= Date.parse(wallet.addedAt),
+              )
+              .map((payment) => ({ wallet, payment })),
+          );
+        } catch (err) {
+          failedWallets += 1;
+          firstFailure ||= readableError(err);
         }
-      }),
-    );
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(4, list.length) }, () => worker()));
     setLoadedPayments(
       records
-        .flat()
         .filter((record) => !dismissedLoadedPayments.includes(loadedPaymentKey(record)))
         .sort((a, b) => Date.parse(b.payment.createdAt) - Date.parse(a.payment.createdAt)),
+    );
+    setError(
+      failedWallets > 0
+        ? `Could not refresh transaction history for ${failedWallets} wallet${failedWallets === 1 ? "" : "s"}: ${firstFailure}`
+        : "",
     );
     setLoadedLoading(false);
   }

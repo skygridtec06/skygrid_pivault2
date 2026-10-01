@@ -13,6 +13,7 @@ type HorizonErrorBody = {
   title?: string;
   detail?: string;
   error?: string;
+  upstreamStatus?: number;
   extras?: { result_codes?: Record<string, unknown> };
 };
 
@@ -37,7 +38,9 @@ async function requestPiApi<T>(
     body: body ? JSON.stringify(body) : undefined,
   });
   const data = (await result.json()) as HorizonErrorBody & Record<string, unknown>;
-  if (!result.ok) throw new HorizonApiError(result.status, data);
+  if (!result.ok || data.error) {
+    throw new HorizonApiError(data.upstreamStatus ?? result.status, data);
+  }
   return data as T;
 }
 
@@ -247,10 +250,13 @@ export async function loadPayments(
   while (hasMore && records.length < limit) {
     const params: Record<string, string> = { address: publicKey };
     if (cursor) params["cursor"] = cursor;
-    const page = await requestPiApi<{
-      _embedded?: { records?: typeof records };
-      nextCursor?: string | null;
-    }>("payments", params);
+    let page: { _embedded?: { records?: typeof records }; nextCursor?: string | null };
+    try {
+      page = await requestPiApi("payments", params);
+    } catch (err: unknown) {
+      if ((err as { response?: { status?: number } })?.response?.status === 404) return [];
+      throw err;
+    }
     const pageRecords = page._embedded?.records ?? [];
     records.push(...pageRecords);
     cursor = page.nextCursor ?? undefined;
