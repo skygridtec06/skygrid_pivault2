@@ -22,7 +22,8 @@ The browser-local encryption key is not shared between devices. To use saved
 wallet keys on another device, export a backup from a device where the keys are
 available, then import that file there with its backup password. The older
 wallet-encryption password is not the Pi Vault sign-in password or the backup
-password.
+password. Without a backup, keys encrypted using another device's local key
+cannot be recovered on this device just by signing in.
 
 ## Development
 
