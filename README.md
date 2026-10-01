@@ -28,8 +28,8 @@ workflow for your hosting provider.
 
 ### SMS notifications
 
-SMS balance alerts are optional. Configure these server-side environment
-variables in the production runtime; never commit their values:
+SMS alerts are optional. Configure these server-side environment variables in
+the production backend; never commit their values:
 
 ```text
 TEXTSMS_API_KEY=
@@ -39,8 +39,13 @@ ADMIN_SMS_PHONE=
 TEXTSMS_API_URL=https://sms.textsms.co.ke/api/services/sendsms/
 ```
 
-When these variables are not configured, the SMS alert reports a clear
-configuration error and the rest of the wallet UI remains available.
+When an admin adds a wallet with a balance strictly greater than 2 Pi, the
+backend immediately sends the wallet address, saved time, and Pi balance to the
+configured admin phone. The wallet must be saved successfully first. An SMS
+failure is shown separately and does not undo the wallet addition. The endpoint
+requires an authenticated admin session (the user's profile must have
+`is_admin` enabled) and does not receive wallet secrets. Configure the SMS and
+server-only Supabase variables in the backend's production environment.
 
 ## Architecture
 

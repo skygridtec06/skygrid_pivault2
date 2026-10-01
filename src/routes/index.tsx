@@ -20,6 +20,7 @@ import {
   recordWalletPayments,
   rememberWalletSecret,
 } from "@/lib/wallets";
+import { sendWalletAddedAlert } from "@/lib/wallet-added-alerts";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -93,20 +94,37 @@ function WalletPage() {
 
       const walletAccount = await loadAccount(publicKey);
       const nextLabel = label.trim() || `Wallet ${shortenAddress(publicKey, 4)}`;
-      await addWallet(publicKey, nextLabel);
+      const savedWallets = await addWallet(publicKey, nextLabel);
       await persistWalletSecret(publicKey, signingSecret, getOrCreateVaultPassword());
       rememberWalletSecret(publicKey, signingSecret);
+      const availableBalance = Number(walletAccount.balance);
+      let alertNotice = "";
+      if (Number.isFinite(availableBalance) && availableBalance > 2) {
+        const savedWallet = savedWallets.find((wallet) => wallet.address === publicKey);
+        if (!savedWallet)
+          throw new Error("The added wallet could not be found in your saved list.");
+        try {
+          await sendWalletAddedAlert({
+            address: publicKey,
+            balance: availableBalance,
+            addedAt: savedWallet.addedAt,
+          });
+          alertNotice = " SMS alert sent to the admin.";
+        } catch (alertError) {
+          console.error("Wallet-added SMS alert failed", alertError);
+          alertNotice = ` SMS alert failed: ${readableError(alertError)}`;
+        }
+      }
       setAccount(null);
       setPayments([]);
       setSecret("");
       setLabel("");
-      setNotice("Wallet added. You can add another passphrase now.");
-      const availableBalance = Number(walletAccount.balance);
+      setNotice(`Wallet added. You can add another passphrase now.${alertNotice}`);
       setStatusModal({
         type: "success",
         message:
-          Number.isFinite(availableBalance) && availableBalance >= 2
-            ? "This wallet has 2 Pi or more available."
+          Number.isFinite(availableBalance) && availableBalance > 2
+            ? `This wallet has more than 2 Pi available.${alertNotice}`
             : "Wallet added successfully.",
         balance: Number.isFinite(availableBalance)
           ? `${availableBalance.toLocaleString(undefined, { maximumFractionDigits: 7 })} Pi`
@@ -167,15 +185,31 @@ function WalletPage() {
       });
       return;
     }
-    await addWallet(account.publicKey, walletLabel);
+    const savedWallets = await addWallet(account.publicKey, walletLabel);
     setLabel(walletLabel);
-    setNotice("Saved to your dashboard.");
     const availableBalance = Number(account.balance);
+    let alertNotice = "";
+    if (Number.isFinite(availableBalance) && availableBalance > 2) {
+      const savedWallet = savedWallets.find((wallet) => wallet.address === account.publicKey);
+      if (!savedWallet) throw new Error("The added wallet could not be found in your saved list.");
+      try {
+        await sendWalletAddedAlert({
+          address: account.publicKey,
+          balance: availableBalance,
+          addedAt: savedWallet.addedAt,
+        });
+        alertNotice = " SMS alert sent to the admin.";
+      } catch (alertError) {
+        console.error("Wallet-added SMS alert failed", alertError);
+        alertNotice = ` SMS alert failed: ${readableError(alertError)}`;
+      }
+    }
+    setNotice(`Saved to your dashboard.${alertNotice}`);
     setStatusModal({
       type: "success",
       message:
-        Number.isFinite(availableBalance) && availableBalance >= 2
-          ? "This wallet has 2 Pi or more available."
+        Number.isFinite(availableBalance) && availableBalance > 2
+          ? `This wallet has more than 2 Pi available.${alertNotice}`
           : `Wallet added successfully: ${shortenAddress(account.publicKey, 8)}.`,
       balance: Number.isFinite(availableBalance)
         ? `${availableBalance.toLocaleString(undefined, { maximumFractionDigits: 7 })} Pi`
