@@ -1,6 +1,6 @@
 import { drainPaymentAlerts, enqueuePaymentAlert } from "../lib/payment-alerts.js";
 
-type Wallet = { id: string; address: string; user_id: string };
+type Wallet = { id: string; address: string; user_id: string; added_at: string };
 type PaymentRecord = {
   id: string;
   type: string;
@@ -43,7 +43,7 @@ async function supabaseFetch(path: string, init?: RequestInit): Promise<Response
 }
 
 async function loadWallets(): Promise<Wallet[]> {
-  const response = await supabaseFetch("wallets?select=id,address,user_id");
+  const response = await supabaseFetch("wallets?select=id,address,user_id,added_at");
   if (!response.ok) throw new Error(`Supabase wallet query failed with HTTP ${response.status}.`);
   return (await response.json()) as Wallet[];
 }
@@ -167,7 +167,16 @@ async function streamWallet(wallet: Wallet): Promise<void> {
           const to = payment.to ?? payment.account ?? "";
           const amount = Number(payment.amount ?? payment.starting_balance ?? 0);
           const isPi = payment.asset_type === "native" || payment.type === "create_account";
-          if (to === wallet.address && amount > 0 && isPi) {
+          const paymentTime = Date.parse(payment.created_at);
+          const walletAddedAt = Date.parse(wallet.added_at);
+          if (
+            to === wallet.address &&
+            amount > 0 &&
+            isPi &&
+            Number.isFinite(paymentTime) &&
+            Number.isFinite(walletAddedAt) &&
+            paymentTime >= walletAddedAt
+          ) {
             await enqueuePaymentAlert({
               walletId: wallet.id,
               userId: wallet.user_id,

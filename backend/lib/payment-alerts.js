@@ -13,6 +13,8 @@
  * @property {number} amount
  * @property {string} received_at
  * @property {number} attempts
+ * @property {string} wallet_id
+ * @property {{added_at?: string} | null} wallets
  */
 
 /** @param {string} name */
@@ -114,7 +116,7 @@ export async function drainPaymentAlerts() {
   const now = new Date().toISOString();
   const queueQuery = new URLSearchParams({
     or: `(status.eq.pending,and(status.eq.processing,lease_expires_at.lt.${now}))`,
-    select: "id,address,amount,received_at,attempts",
+    select: "id,address,amount,received_at,attempts,wallet_id,wallets(added_at)",
     order: "created_at.asc",
     limit: "25",
   });
@@ -144,6 +146,46 @@ export async function drainPaymentAlerts() {
     if (!Array.isArray(claimed))
       throw new Error("Payment alert claim returned an invalid response.");
     if (claimed.length === 0) continue;
+
+    const receivedAt = Date.parse(alert.received_at);
+    const addedAt = Date.parse(alert.wallets?.added_at ?? "");
+    if (!Number.isFinite(receivedAt) || !Number.isFinite(addedAt)) {
+      const discard = await supabaseFetch(
+        `wallet_payment_alerts?id=eq.${encodeURIComponent(alert.id)}&status=eq.processing`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({
+            status: "discarded",
+            last_error: "Missing or invalid wallet/payment timestamp; SMS discarded.",
+            lease_expires_at: null,
+          }),
+        },
+      );
+      if (!discard.ok) {
+        throw new Error(`Invalid payment alert discard failed with HTTP ${discard.status}.`);
+      }
+      continue;
+    }
+    if (receivedAt < addedAt) {
+      const discard = await supabaseFetch(
+        `wallet_payment_alerts?id=eq.${encodeURIComponent(alert.id)}&status=eq.processing`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({
+            status: "discarded",
+            last_error: "Payment predates wallet registration; SMS discarded.",
+            lease_expires_at: null,
+          }),
+        },
+      );
+      if (!discard.ok) {
+        throw new Error(
+          `Pre-registration payment alert discard failed with HTTP ${discard.status}.`,
+        );
+      }
+      console.log(`Discarded pre-registration payment alert for ${alert.address.slice(0, 8)}.`);
+      continue;
+    }
 
     try {
       await sendAlert(alert);

@@ -9,7 +9,7 @@ type VercelResponse = {
   json: (body: unknown) => VercelResponse;
 };
 
-type Wallet = { id: string; address: string; user_id: string };
+type Wallet = { id: string; address: string; user_id: string; added_at: string };
 type PaymentRecord = {
   id: string;
   type: string;
@@ -52,7 +52,7 @@ async function supabaseFetch(path: string, init?: RequestInit): Promise<Response
 }
 
 async function loadWallets(): Promise<Wallet[]> {
-  const response = await supabaseFetch("wallets?select=id,address,user_id");
+  const response = await supabaseFetch("wallets?select=id,address,user_id,added_at");
   if (!response.ok) throw new Error(`Supabase wallet query failed with HTTP ${response.status}.`);
   return (await response.json()) as Wallet[];
 }
@@ -119,10 +119,15 @@ export default async function handler(request: VercelRequest, response: VercelRe
           const to = payment.to ?? payment.account ?? "";
           const isPi = payment.asset_type === "native" || payment.type === "create_account";
           const age = Date.now() - Date.parse(payment.created_at);
+          const isAfterWalletAdded =
+            Number.isFinite(Date.parse(payment.created_at)) &&
+            Number.isFinite(Date.parse(wallet.added_at)) &&
+            Date.parse(payment.created_at) >= Date.parse(wallet.added_at);
           if (
             to === wallet.address &&
             isPi &&
             amount > 0 &&
+            isAfterWalletAdded &&
             age >= -60_000 &&
             age <= 5 * 60_000 &&
             payment.id

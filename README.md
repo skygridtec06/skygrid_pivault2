@@ -79,6 +79,9 @@ server-only Supabase variables in the backend's production environment.
   deploying the worker or enabling the cron. The cron is a fallback, not a
   two-second delivery guarantee; delivery also depends on Horizon and the SMS
   provider.
+  - Payment SMS is eligible only when its Horizon `created_at` timestamp is at
+    or after the wallet's Supabase `added_at` timestamp. Older pending alerts are
+    marked discarded and never sent.
 - `src/` contains the browser application and TanStack route/client code.
 - `src/Server/` is a legacy-named client-only module containing Pi SDK and
   local-wallet helpers. It uses browser storage and client-side signing; it is
