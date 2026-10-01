@@ -1,5 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useMemo, useRef, useState } from "react";
+import type { FormEvent } from "react";
 import {
   ArrowDownToLine,
   ArrowLeftRight,
@@ -34,6 +35,7 @@ import {
   removeWalletForUser,
   recordWalletPayments,
   unlockWalletVaultAutomatically,
+  WalletKeyMigrationRequiredError,
   type SavedWallet,
 } from "@/lib/wallets";
 
@@ -256,14 +258,31 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
   const [markingWallets, setMarkingWallets] = useState(false);
   const [selectedWallets, setSelectedWallets] = useState<string[]>([]);
   const [walletsPendingRemoval, setWalletsPendingRemoval] = useState<AdminWallet[] | null>(null);
+  const [migrationPassword, setMigrationPassword] = useState("");
+  const [migrationError, setMigrationError] = useState("");
+  const [migrationRequired, setMigrationRequired] = useState(false);
+  const [migrationBusy, setMigrationBusy] = useState(false);
   const balanceRefreshId = useRef(0);
+
+  async function unlockSavedWalletKeys(password?: string): Promise<number | null> {
+    try {
+      return await unlockWalletVaultAutomatically(password);
+    } catch (err) {
+      if (err instanceof WalletKeyMigrationRequiredError) {
+        setMigrationRequired(true);
+        return null;
+      }
+      throw err;
+    }
+  }
 
   useEffect(() => {
     void (async () => {
       const [seeded, users] = await Promise.all([loadAllUserWallets(), listUsers()]);
       setWallets(seeded);
       setUserCount(users.length);
-      await unlockWalletVaultAutomatically();
+      const unlockedCount = await unlockSavedWalletKeys();
+      if (unlockedCount === null) return;
       setRevealedSecrets(
         Object.fromEntries(
           seeded.filter((w) => Boolean(getWalletSecret(w.address))).map((w) => [w.address, true]),
@@ -444,10 +463,36 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
     setMessage("Passcode updated.");
   }
 
+  async function migrateSavedWalletKeys(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setMigrationBusy(true);
+    setMigrationError("");
+    try {
+      await unlockWalletVaultAutomatically(migrationPassword);
+      setMigrationRequired(false);
+      setMigrationPassword("");
+      setRevealedSecrets(
+        Object.fromEntries(
+          wallets
+            .filter((wallet) => Boolean(getWalletSecret(wallet.address)))
+            .map((wallet) => [wallet.address, true]),
+        ),
+      );
+      setMessage("Saved wallet keys restored for automatic unlock on this browser.");
+    } catch (err) {
+      setMigrationError(
+        err instanceof Error ? err.message : "The saved wallet keys could not be migrated.",
+      );
+    } finally {
+      setMigrationBusy(false);
+    }
+  }
+
   function toggleSecret(address: string) {
     if (!getWalletSecret(address)) {
-      void unlockWalletVaultAutomatically()
+      void unlockSavedWalletKeys()
         .then((count) => {
+          if (count === null) return;
           setMessage(`${count} saved wallet key${count === 1 ? "" : "s"} unlocked.`);
           setRevealedSecrets((current) => ({ ...current, [address]: true }));
         })
@@ -467,7 +512,8 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
     let secret = getWalletSecret(address);
     if (!secret) {
       try {
-        await unlockWalletVaultAutomatically();
+        const count = await unlockSavedWalletKeys();
+        if (count === null) return;
         secret = getWalletSecret(address);
       } catch (err) {
         setError(err instanceof Error ? err.message : "Vault unlock failed.");
@@ -551,7 +597,8 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
     let secret = getWalletSecret(sendWallet.address);
     if (!secret) {
       try {
-        await unlockWalletVaultAutomatically();
+        const count = await unlockSavedWalletKeys();
+        if (count === null) return;
         secret = getWalletSecret(sendWallet.address);
       } catch (err) {
         setSendError(err instanceof Error ? err.message : "Vault unlock failed.");
@@ -694,6 +741,34 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
 
   return (
     <>
+      {migrationRequired ? (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 px-4 backdrop-blur-sm">
+          <form
+            onSubmit={(event) => void migrateSavedWalletKeys(event)}
+            className="panel w-full max-w-md space-y-5 p-6 shadow-2xl"
+          >
+            <div>
+              <h2 className="text-xl font-bold">Restore saved wallet keys</h2>
+              <p className="mt-2 text-sm text-muted-foreground">
+                Enter your previous password once to convert saved keys to automatic unlock on this
+                browser. It will not be saved.
+              </p>
+            </div>
+            <Field
+              label="Previous password"
+              type="password"
+              autoComplete="current-password"
+              value={migrationPassword}
+              onChange={(event) => setMigrationPassword(event.target.value)}
+              required
+            />
+            {migrationError ? <p className="text-sm text-destructive">{migrationError}</p> : null}
+            <ActionButton tone="accent" type="submit" disabled={migrationBusy}>
+              {migrationBusy ? "Restoring…" : "Restore keys"}
+            </ActionButton>
+          </form>
+        </div>
+      ) : null}
       {sendWallet ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4 backdrop-blur-sm">
           <div className="panel w-full max-w-lg p-6 shadow-2xl">

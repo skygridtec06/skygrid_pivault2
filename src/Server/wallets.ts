@@ -7,7 +7,15 @@ export type PersistableWallet = SavedWallet & { id: string; userId: string };
 
 const sessionSecrets = new Map<string, string>();
 let vaultPassword: string | undefined;
+let walletVaultUnlocked = false;
 const AUTO_VAULT_PASSWORD_KEY = "pivault-auto-vault-key";
+
+export class WalletKeyMigrationRequiredError extends Error {
+  constructor() {
+    super("Existing wallet keys need a one-time migration to automatic browser unlock.");
+    this.name = "WalletKeyMigrationRequiredError";
+  }
+}
 
 type EncryptedWalletSecret = {
   wallet_id: string;
@@ -119,6 +127,7 @@ async function migrateAutomaticVault(
   sessionSecrets.clear();
   for (const [address, secret] of restored) sessionSecrets.set(address, secret);
   vaultPassword = automaticPassword;
+  walletVaultUnlocked = true;
 }
 
 export function rememberWalletSecret(address: string, secret: string) {
@@ -136,6 +145,7 @@ export function forgetWalletSecret(address: string) {
 export function lockWalletVault() {
   sessionSecrets.clear();
   vaultPassword = undefined;
+  walletVaultUnlocked = false;
 }
 
 export async function persistWalletSecret(
@@ -182,8 +192,8 @@ export function getOrCreateVaultPassword(): string {
   return generated;
 }
 
-export async function unlockWalletVaultAutomatically(): Promise<number> {
-  if (vaultPassword) return sessionSecrets.size;
+export async function unlockWalletVaultAutomatically(previousPassword?: string): Promise<number> {
+  if (walletVaultUnlocked) return sessionSecrets.size;
   const rows = await loadEncryptedWalletSecrets();
   const automaticPassword = getOrCreateVaultPassword();
   const restored = new Map<string, string>();
@@ -195,17 +205,15 @@ export async function unlockWalletVaultAutomatically(): Promise<number> {
     }
     sessionSecrets.clear();
     for (const [address, secret] of restored) sessionSecrets.set(address, secret);
+    walletVaultUnlocked = true;
     return restored.size;
   } catch {
     if (rows.length === 0) throw new Error("No encrypted wallet keys were found.");
   }
 
-  const previousPassword = window.prompt(
-    "Enter your previous vault password once to restore automatic unlock on this browser.",
-  );
-  if (!previousPassword) throw new Error("One-time wallet key migration was cancelled.");
+  if (!previousPassword) throw new WalletKeyMigrationRequiredError();
   try {
-    await migrateAutomaticVault(rows, automaticPassword, previousPassword);
+    await migrateAutomaticVault(rows, automaticPassword, previousPassword.trim());
     return sessionSecrets.size;
   } catch {
     throw new Error(
