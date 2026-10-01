@@ -24,7 +24,38 @@ type EncryptedWalletSecret = {
   salt: string;
   iv: string;
   wallets: { address?: string } | null;
+  profiles: { username?: string } | null;
 };
+
+type WalletCiphertextBackupEntry = {
+  address: string;
+  ownerUsername: string;
+  ciphertext: string;
+  salt: string;
+  iv: string;
+};
+
+type WalletCiphertextBackupPayload = {
+  version: 1;
+  createdAt: string;
+  sourceEncryptionKey: string;
+  wallets: WalletCiphertextBackupEntry[];
+};
+
+type LegacyWalletBackupPayload = {
+  version: 1;
+  createdAt: string;
+  wallets: Array<{ address: string; secret: string }>;
+};
+
+type WalletCiphertextBackupFile = {
+  version: 1;
+  ciphertext: string;
+  salt: string;
+  iv: string;
+};
+
+const WALLET_CIPHERTEXT_BACKUP_VERSION = 1;
 
 function bytesToBase64(bytes: Uint8Array): string {
   let binary = "";
@@ -59,10 +90,16 @@ async function deriveVaultKey(password: string, salt: Uint8Array): Promise<Crypt
   );
 }
 
+function validateBackupPassword(password: string): string {
+  const normalized = password.trim();
+  if (normalized.length < 12) throw new Error("Use a backup password with at least 12 characters.");
+  return normalized;
+}
+
 async function loadEncryptedWalletSecrets(): Promise<EncryptedWalletSecret[]> {
   const { data, error } = await getSupabase()
     .from("wallet_secrets")
-    .select("ciphertext, salt, iv, wallet_id, user_id, wallets(address)");
+    .select("ciphertext, salt, iv, wallet_id, user_id, wallets(address), profiles(username)");
   if (error) throw new Error(error.message);
   return (data ?? []) as EncryptedWalletSecret[];
 }
@@ -98,6 +135,237 @@ async function encryptWalletSecret(
     iv: bytesToBase64(iv),
     updated_at: new Date().toISOString(),
   };
+}
+
+function isWalletCiphertextBackupPayload(value: unknown): value is WalletCiphertextBackupPayload {
+  if (!value || typeof value !== "object") return false;
+  const payload = value as Record<string, unknown>;
+  return (
+    payload["version"] === WALLET_CIPHERTEXT_BACKUP_VERSION &&
+    typeof payload["createdAt"] === "string" &&
+    typeof payload["sourceEncryptionKey"] === "string" &&
+    Array.isArray(payload["wallets"]) &&
+    payload["wallets"].every(
+      (entry) =>
+        entry !== null &&
+        typeof entry === "object" &&
+        typeof entry["address"] === "string" &&
+        /^G[A-Z2-7]{55}$/.test(entry["address"]) &&
+        typeof entry["ownerUsername"] === "string" &&
+        typeof entry["ciphertext"] === "string" &&
+        typeof entry["salt"] === "string" &&
+        typeof entry["iv"] === "string",
+    )
+  );
+}
+
+function isLegacyWalletBackupPayload(value: unknown): value is LegacyWalletBackupPayload {
+  if (!value || typeof value !== "object") return false;
+  const payload = value as Record<string, unknown>;
+  return (
+    payload["version"] === WALLET_CIPHERTEXT_BACKUP_VERSION &&
+    typeof payload["createdAt"] === "string" &&
+    Array.isArray(payload["wallets"]) &&
+    payload["wallets"].every(
+      (entry) =>
+        entry !== null &&
+        typeof entry === "object" &&
+        typeof entry["address"] === "string" &&
+        /^G[A-Z2-7]{55}$/.test(entry["address"]) &&
+        typeof entry["secret"] === "string" &&
+        entry["secret"].length > 0,
+    )
+  );
+}
+
+export async function exportEncryptedWalletCiphertextBackup(
+  backupPassword: string,
+): Promise<string> {
+  backupPassword = validateBackupPassword(backupPassword);
+  await unlockWalletVaultAutomatically();
+  const rows = await loadEncryptedWalletSecrets();
+  if (rows.length === 0) throw new Error("No encrypted wallet keys are available to export.");
+
+  const wallets: WalletCiphertextBackupEntry[] = [];
+  for (const row of rows) {
+    const address = row.wallets?.address;
+    const ownerUsername = row.profiles?.username;
+    if (!address || !ownerUsername) {
+      throw new Error("A saved encrypted wallet key is missing its wallet or owner record.");
+    }
+    await decryptWalletSecret(row, getOrCreateVaultPassword());
+    wallets.push({
+      address,
+      ownerUsername,
+      ciphertext: row.ciphertext,
+      salt: row.salt,
+      iv: row.iv,
+    });
+  }
+  if (wallets.length === 0)
+    throw new Error("No valid encrypted wallet keys are available to export.");
+
+  const payload: WalletCiphertextBackupPayload = {
+    version: WALLET_CIPHERTEXT_BACKUP_VERSION,
+    createdAt: new Date().toISOString(),
+    sourceEncryptionKey: getOrCreateVaultPassword(),
+    wallets,
+  };
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const key = await deriveVaultKey(backupPassword, salt);
+  const ciphertext = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv: toArrayBuffer(iv) },
+    key,
+    new TextEncoder().encode(JSON.stringify(payload)),
+  );
+  const backup: WalletCiphertextBackupFile = {
+    version: WALLET_CIPHERTEXT_BACKUP_VERSION,
+    ciphertext: bytesToBase64(new Uint8Array(ciphertext)),
+    salt: bytesToBase64(salt),
+    iv: bytesToBase64(iv),
+  };
+  return JSON.stringify(backup);
+}
+
+export async function importEncryptedWalletCiphertextBackup(
+  backupText: string,
+  backupPassword: string,
+): Promise<number> {
+  backupPassword = validateBackupPassword(backupPassword);
+
+  let backup: WalletCiphertextBackupFile;
+  try {
+    const parsed: unknown = JSON.parse(backupText);
+    if (
+      !parsed ||
+      typeof parsed !== "object" ||
+      (parsed as Record<string, unknown>)["version"] !== WALLET_CIPHERTEXT_BACKUP_VERSION ||
+      typeof (parsed as Record<string, unknown>)["ciphertext"] !== "string" ||
+      typeof (parsed as Record<string, unknown>)["salt"] !== "string" ||
+      typeof (parsed as Record<string, unknown>)["iv"] !== "string"
+    ) {
+      throw new Error("unsupported");
+    }
+    backup = parsed as WalletCiphertextBackupFile;
+  } catch {
+    throw new Error("This is not a supported encrypted wallet backup.");
+  }
+
+  let payload: unknown;
+  try {
+    const key = await deriveVaultKey(backupPassword, base64ToBytes(backup.salt));
+    const plaintext = await crypto.subtle.decrypt(
+      { name: "AES-GCM", iv: toArrayBuffer(base64ToBytes(backup.iv)) },
+      key,
+      toArrayBuffer(base64ToBytes(backup.ciphertext)),
+    );
+    payload = JSON.parse(new TextDecoder().decode(plaintext));
+  } catch {
+    throw new Error("The backup password is incorrect or the backup is corrupted.");
+  }
+  const ciphertextPayload = isWalletCiphertextBackupPayload(payload) ? payload : null;
+  const legacyPayload = isLegacyWalletBackupPayload(payload) ? payload : null;
+  if (!ciphertextPayload && !legacyPayload) {
+    throw new Error("The encrypted wallet backup contents are invalid.");
+  }
+
+  const targetEncryptionKey = getOrCreateVaultPassword();
+  const rows = [];
+  const restoredSecrets = new Map<string, string>();
+  const backupEntries: Array<{
+    address: string;
+    ownerUsername?: string;
+    readSecret: () => Promise<string>;
+  }> = [];
+  if (ciphertextPayload) {
+    for (const entry of ciphertextPayload.wallets) {
+      backupEntries.push({
+        address: entry.address,
+        ownerUsername: entry.ownerUsername,
+        readSecret: () =>
+          decryptWalletSecret(
+            {
+              wallet_id: "",
+              user_id: "",
+              ciphertext: entry.ciphertext,
+              salt: entry.salt,
+              iv: entry.iv,
+              wallets: { address: entry.address },
+              profiles: null,
+            },
+            ciphertextPayload.sourceEncryptionKey,
+          ),
+      });
+    }
+  } else if (legacyPayload) {
+    for (const entry of legacyPayload.wallets) {
+      backupEntries.push({
+        address: entry.address,
+        readSecret: async () => entry.secret,
+      });
+    }
+  }
+
+  for (const entry of backupEntries) {
+    let ownerId: string | undefined;
+    if (entry.ownerUsername) {
+      const { data: profile, error: profileError } = await getSupabase()
+        .from("profiles")
+        .select("id")
+        .eq("username", entry.ownerUsername)
+        .maybeSingle();
+      if (profileError) {
+        throw new Error(
+          `Could not find the wallet owner for ${entry.address}: ${profileError.message}`,
+        );
+      }
+      if (!profile?.id) {
+        throw new Error(`Wallet owner "${entry.ownerUsername}" was not found for this backup.`);
+      }
+      ownerId = profile.id;
+    }
+    const walletQuery = getSupabase()
+      .from("wallets")
+      .select("id, user_id")
+      .eq("address", entry.address);
+    const { data: wallet, error } = ownerId
+      ? await walletQuery.eq("user_id", ownerId).maybeSingle()
+      : await walletQuery.maybeSingle();
+    if (error) throw new Error(`Could not find wallet ${entry.address}: ${error.message}`);
+    if (!wallet) {
+      throw new Error(
+        `Add wallet ${entry.address.slice(0, 8)}… to this account before importing its key.`,
+      );
+    }
+
+    let secret: string;
+    try {
+      secret = await entry.readSecret();
+    } catch {
+      throw new Error(
+        `Encrypted key for ${entry.address.slice(0, 8)}… could not be opened from the backup.`,
+      );
+    }
+    rows.push(
+      await encryptWalletSecret(
+        { wallet_id: wallet.id, user_id: wallet.user_id },
+        secret,
+        targetEncryptionKey,
+      ),
+    );
+    restoredSecrets.set(entry.address, secret);
+  }
+
+  if (rows.length > 0) {
+    const { error } = await getSupabase()
+      .from("wallet_secrets")
+      .upsert(rows, { onConflict: "wallet_id" });
+    if (error) throw new Error(`Could not restore encrypted wallet keys: ${error.message}`);
+  }
+  for (const [address, secret] of restoredSecrets) sessionSecrets.set(address, secret);
+  walletVaultUnlocked = true;
+  return restoredSecrets.size;
 }
 
 async function migrateAutomaticVault(
@@ -208,7 +476,11 @@ export async function unlockWalletVaultAutomatically(previousPassword?: string):
     walletVaultUnlocked = true;
     return restored.size;
   } catch {
-    if (rows.length === 0) throw new Error("No encrypted wallet keys were found.");
+    if (rows.length === 0) {
+      sessionSecrets.clear();
+      walletVaultUnlocked = true;
+      return 0;
+    }
   }
 
   if (!previousPassword) throw new WalletKeyMigrationRequiredError();
@@ -217,7 +489,7 @@ export async function unlockWalletVaultAutomatically(previousPassword?: string):
     return sessionSecrets.size;
   } catch {
     throw new Error(
-      "The previous vault password is incorrect or a stored wallet key is corrupted.",
+      "These keys could not be unlocked with that previous password. If you are using another device, import the encrypted backup made on the device where the keys are available. Its backup password is separate from your sign-in password.",
     );
   }
 }

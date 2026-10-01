@@ -13,6 +13,17 @@ that browser, but anyone who can access its browser profile may also be able to
 access the keys. Older keys encrypted with a private vault password require
 that password once to migrate back to automatic unlock.
 
+The admin control panel can export/import a portable backup of saved encrypted
+wallet-key records. Each backup file is encrypted with a separate password
+(minimum 12 characters); imported keys are re-encrypted for the current
+browser. Keep the backup file and its password separate and private. Older
+encrypted wallet backups are also accepted.
+The browser-local encryption key is not shared between devices. To use saved
+wallet keys on another device, export a backup from a device where the keys are
+available, then import that file there with its backup password. The older
+wallet-encryption password is not the Pi Vault sign-in password or the backup
+password.
+
 ## Development
 
 Requirements: Node.js 20+ and npm.

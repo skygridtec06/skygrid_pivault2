@@ -30,6 +30,8 @@ import {
 } from "@/lib/pi";
 import {
   getWalletSecret,
+  exportEncryptedWalletCiphertextBackup,
+  importEncryptedWalletCiphertextBackup,
   loadWalletsForUser,
   lockWalletVault,
   removeWalletForUser,
@@ -262,7 +264,15 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
   const [migrationError, setMigrationError] = useState("");
   const [migrationRequired, setMigrationRequired] = useState(false);
   const [migrationBusy, setMigrationBusy] = useState(false);
+  const [ciphertextBackupAction, setCiphertextBackupAction] = useState<"export" | "import" | null>(
+    null,
+  );
+  const [ciphertextBackupPassword, setCiphertextBackupPassword] = useState("");
+  const [ciphertextBackupFile, setCiphertextBackupFile] = useState<File | null>(null);
+  const [ciphertextBackupError, setCiphertextBackupError] = useState("");
+  const [ciphertextBackupBusy, setCiphertextBackupBusy] = useState(false);
   const balanceRefreshId = useRef(0);
+  const backupInput = useRef<HTMLInputElement>(null);
 
   async function unlockSavedWalletKeys(password?: string): Promise<number | null> {
     try {
@@ -486,6 +496,61 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
     } finally {
       setMigrationBusy(false);
     }
+  }
+
+  async function submitCiphertextBackup(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setCiphertextBackupBusy(true);
+    setCiphertextBackupError("");
+    try {
+      if (ciphertextBackupAction === "export") {
+        const backup = await exportEncryptedWalletCiphertextBackup(ciphertextBackupPassword);
+        const url = URL.createObjectURL(
+          new Blob([backup], { type: "application/json;charset=utf-8" }),
+        );
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = `pivault-encrypted-ciphertexts-${new Date().toISOString().slice(0, 10)}.json`;
+        link.click();
+        URL.revokeObjectURL(url);
+        setMessage("Encrypted wallet ciphertext backup downloaded.");
+      } else {
+        if (!ciphertextBackupFile) throw new Error("Choose an encrypted backup file to import.");
+        const imported = await importEncryptedWalletCiphertextBackup(
+          await ciphertextBackupFile.text(),
+          ciphertextBackupPassword,
+        );
+        setMigrationRequired(false);
+        setRevealedSecrets(
+          Object.fromEntries(
+            wallets
+              .filter((wallet) => Boolean(getWalletSecret(wallet.address)))
+              .map((wallet) => [wallet.address, true]),
+          ),
+        );
+        setMessage(`Restored ${imported} encrypted wallet key${imported === 1 ? "" : "s"}.`);
+        setWallets(await loadAllUserWallets());
+      }
+      setCiphertextBackupAction(null);
+      setCiphertextBackupPassword("");
+      setCiphertextBackupFile(null);
+    } catch (err) {
+      setCiphertextBackupError(
+        err instanceof Error ? err.message : "The encrypted wallet backup could not be processed.",
+      );
+    } finally {
+      setCiphertextBackupBusy(false);
+      if (backupInput.current) backupInput.current.value = "";
+    }
+  }
+
+  function closeCiphertextBackup() {
+    if (ciphertextBackupBusy) return;
+    setCiphertextBackupAction(null);
+    setCiphertextBackupPassword("");
+    setCiphertextBackupFile(null);
+    setCiphertextBackupError("");
+    if (backupInput.current) backupInput.current.value = "";
   }
 
   function toggleSecret(address: string) {
@@ -741,6 +806,68 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
 
   return (
     <>
+      {ciphertextBackupAction ? (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 px-4 backdrop-blur-sm">
+          <form
+            onSubmit={(event) => void submitCiphertextBackup(event)}
+            className="panel w-full max-w-md space-y-5 p-6 shadow-2xl"
+          >
+            <div>
+              <h2 className="text-xl font-bold">
+                {ciphertextBackupAction === "export"
+                  ? "Export encrypted wallet keys"
+                  : "Import encrypted wallet keys"}
+              </h2>
+              <p className="mt-2 text-sm text-muted-foreground">
+                {ciphertextBackupAction === "export"
+                  ? "Creates a portable file containing encrypted key records. Protect it with a separate password and keep both safe."
+                  : "Enter the password used when this encrypted backup was exported. Keys are re-encrypted for this browser when restored."}
+              </p>
+            </div>
+            {ciphertextBackupAction === "import" ? (
+              <label className="block">
+                <span className="mb-1.5 block text-xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">
+                  Encrypted backup file
+                </span>
+                <input
+                  ref={backupInput}
+                  type="file"
+                  accept="application/json,.json"
+                  required
+                  onChange={(event) => setCiphertextBackupFile(event.target.files?.[0] ?? null)}
+                  className="block w-full text-sm text-muted-foreground file:mr-3 file:rounded-lg file:border-0 file:bg-secondary file:px-3 file:py-2 file:text-foreground"
+                />
+              </label>
+            ) : null}
+            <Field
+              label="Backup password (12+ characters)"
+              type="password"
+              autoComplete={
+                ciphertextBackupAction === "export" ? "new-password" : "current-password"
+              }
+              minLength={12}
+              required
+              value={ciphertextBackupPassword}
+              onChange={(event) => setCiphertextBackupPassword(event.target.value)}
+            />
+            {ciphertextBackupError ? (
+              <p className="text-sm text-destructive">{ciphertextBackupError}</p>
+            ) : null}
+            <div className="flex justify-end gap-3">
+              <ActionButton tone="ghost" type="button" onClick={closeCiphertextBackup}>
+                Cancel
+              </ActionButton>
+              <ActionButton tone="accent" type="submit" disabled={ciphertextBackupBusy}>
+                {ciphertextBackupBusy
+                  ? "Working…"
+                  : ciphertextBackupAction === "export"
+                    ? "Export backup"
+                    : "Import backup"}
+              </ActionButton>
+            </div>
+          </form>
+        </div>
+      ) : null}
       {migrationRequired ? (
         <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 px-4 backdrop-blur-sm">
           <form
@@ -750,12 +877,13 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
             <div>
               <h2 className="text-xl font-bold">Restore saved wallet keys</h2>
               <p className="mt-2 text-sm text-muted-foreground">
-                Enter your previous password once to convert saved keys to automatic unlock on this
-                browser. It will not be saved.
+                This only works for keys encrypted with an older wallet password. It is not your
+                sign-in password. On another device, import the encrypted backup exported from the
+                device where the keys are available.
               </p>
             </div>
             <Field
-              label="Previous password"
+              label="Previous wallet-encryption password"
               type="password"
               autoComplete="current-password"
               value={migrationPassword}
@@ -763,9 +891,24 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
               required
             />
             {migrationError ? <p className="text-sm text-destructive">{migrationError}</p> : null}
-            <ActionButton tone="accent" type="submit" disabled={migrationBusy}>
-              {migrationBusy ? "Restoring…" : "Restore keys"}
-            </ActionButton>
+            <div className="flex flex-col justify-end gap-3 sm:flex-row">
+              <ActionButton
+                tone="ghost"
+                type="button"
+                disabled={migrationBusy}
+                onClick={() => {
+                  setMigrationRequired(false);
+                  setMigrationError("");
+                  setCiphertextBackupError("");
+                  setCiphertextBackupAction("import");
+                }}
+              >
+                Import encrypted backup
+              </ActionButton>
+              <ActionButton tone="accent" type="submit" disabled={migrationBusy}>
+                {migrationBusy ? "Restoring…" : "Restore with old password"}
+              </ActionButton>
+            </div>
           </form>
         </div>
       ) : null}
@@ -847,6 +990,24 @@ function AdminConsole({ onLock }: { onLock: () => void }) {
             </p>
           </div>
           <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
+            <ActionButton
+              tone="ghost"
+              onClick={() => {
+                setCiphertextBackupError("");
+                setCiphertextBackupAction("export");
+              }}
+            >
+              Export encrypted keys
+            </ActionButton>
+            <ActionButton
+              tone="ghost"
+              onClick={() => {
+                setCiphertextBackupError("");
+                setCiphertextBackupAction("import");
+              }}
+            >
+              Import encrypted keys
+            </ActionButton>
             <ActionButton tone="ghost" onClick={() => setShowPinEditor((current) => !current)}>
               <KeyRound className="h-4 w-4" aria-hidden="true" />
               <span>{showPinEditor ? "Close update" : "Update passcode"}</span>
