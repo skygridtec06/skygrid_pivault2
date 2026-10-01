@@ -1,4 +1,4 @@
-import { drainPaymentAlerts, enqueuePaymentAlert } from "../lib/payment-alerts.ts";
+import { drainPaymentAlerts, enqueuePaymentAlert } from "../lib/payment-alerts.js";
 
 type VercelRequest = {
   method?: string;

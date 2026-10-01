@@ -1,4 +1,4 @@
-import { drainPaymentAlerts, enqueuePaymentAlert } from "../lib/payment-alerts.ts";
+import { drainPaymentAlerts, enqueuePaymentAlert } from "../lib/payment-alerts.js";
 
 type Wallet = { id: string; address: string; user_id: string };
 type PaymentRecord = {

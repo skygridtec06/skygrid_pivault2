@@ -1,29 +1,32 @@
-declare const process: { env: Record<string, string | undefined> };
+/**
+ * @typedef {Object} PaymentAlertInput
+ * @property {string} walletId
+ * @property {string} userId
+ * @property {string} address
+ * @property {string} externalId
+ * @property {number} amount
+ * @property {string} receivedAt
+ *
+ * @typedef {Object} PendingAlert
+ * @property {string} id
+ * @property {string} address
+ * @property {number} amount
+ * @property {string} received_at
+ * @property {number} attempts
+ */
 
-export type PaymentAlertInput = {
-  walletId: string;
-  userId: string;
-  address: string;
-  externalId: string;
-  amount: number;
-  receivedAt: string;
-};
-
-type PendingAlert = {
-  id: string;
-  address: string;
-  amount: number;
-  received_at: string;
-  attempts: number;
-};
-
-function required(name: string): string {
+/** @param {string} name */
+function required(name) {
   const value = process.env[name];
   if (!value) throw new Error(`${name} is required.`);
   return value;
 }
 
-async function supabaseFetch(path: string, init?: RequestInit): Promise<Response> {
+/**
+ * @param {string} path
+ * @param {RequestInit} [init]
+ */
+async function supabaseFetch(path, init) {
   const supabaseUrl = process.env["SUPABASE_URL"] ?? process.env["VITE_SUPABASE_URL"];
   const serviceKey = required("SUPABASE_SERVICE_ROLE_KEY");
   if (!supabaseUrl) throw new Error("SUPABASE_URL is required.");
@@ -38,7 +41,8 @@ async function supabaseFetch(path: string, init?: RequestInit): Promise<Response
   });
 }
 
-export async function enqueuePaymentAlert(alert: PaymentAlertInput): Promise<boolean> {
+/** @param {PaymentAlertInput} alert */
+export async function enqueuePaymentAlert(alert) {
   const response = await supabaseFetch(
     "wallet_payment_alerts?on_conflict=wallet_id%2Cexternal_id",
     {
@@ -57,18 +61,22 @@ export async function enqueuePaymentAlert(alert: PaymentAlertInput): Promise<boo
   if (!response.ok) {
     throw new Error(`Payment alert queue insert failed with HTTP ${response.status}.`);
   }
-  const inserted = (await response.json()) as unknown[];
+  const inserted = await response.json();
+  if (!Array.isArray(inserted))
+    throw new Error("Payment alert queue returned an invalid response.");
   return inserted.length > 0;
 }
 
-function normalizeKenyanPhone(phone: string): string {
+/** @param {string} phone */
+function normalizeKenyanPhone(phone) {
   const digits = phone.replace(/\D/g, "");
   if (/^254[17]\d{8}$/.test(digits)) return digits;
   if (/^0[17]\d{8}$/.test(digits)) return `254${digits.slice(1)}`;
   throw new Error("ADMIN_SMS_PHONE must be a valid Kenyan mobile number.");
 }
 
-async function sendAlert(alert: PendingAlert): Promise<void> {
+/** @param {PendingAlert} alert */
+async function sendAlert(alert) {
   const apiKey = required("TEXTSMS_API_KEY");
   const partnerId = required("TEXTSMS_PARTNER_ID");
   const shortcode = required("TEXTSMS_SHORTCODE");
@@ -94,13 +102,7 @@ async function sendAlert(alert: PendingAlert): Promise<void> {
   });
   if (!response.ok) throw new Error(`SMS provider returned HTTP ${response.status}.`);
 
-  const result = (await response.json()) as {
-    responses?: Array<{
-      "respose-code"?: number;
-      "response-code"?: number;
-      "response-description"?: string;
-    }>;
-  };
+  const result = await response.json();
   const provider = result.responses?.[0];
   const code = Number(provider?.["respose-code"] ?? provider?.["response-code"]);
   if (code !== 200) {
@@ -108,7 +110,7 @@ async function sendAlert(alert: PendingAlert): Promise<void> {
   }
 }
 
-export async function drainPaymentAlerts(): Promise<number> {
+export async function drainPaymentAlerts() {
   const now = new Date().toISOString();
   const queueQuery = new URLSearchParams({
     or: `(status.eq.pending,and(status.eq.processing,lease_expires_at.lt.${now}))`,
@@ -120,7 +122,8 @@ export async function drainPaymentAlerts(): Promise<number> {
   if (!response.ok) {
     throw new Error(`Payment alert queue lookup failed with HTTP ${response.status}.`);
   }
-  const alerts = (await response.json()) as PendingAlert[];
+  const alerts = await response.json();
+  if (!Array.isArray(alerts)) throw new Error("Payment alert queue returned an invalid response.");
   let sent = 0;
 
   for (const alert of alerts) {
@@ -137,7 +140,9 @@ export async function drainPaymentAlerts(): Promise<number> {
     if (!claim.ok) {
       throw new Error(`Payment alert claim failed with HTTP ${claim.status}.`);
     }
-    const claimed = (await claim.json()) as unknown[];
+    const claimed = await claim.json();
+    if (!Array.isArray(claimed))
+      throw new Error("Payment alert claim returned an invalid response.");
     if (claimed.length === 0) continue;
 
     try {
